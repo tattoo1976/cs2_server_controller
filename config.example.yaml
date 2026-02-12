@@ -1,0 +1,18 @@
+# Copy this file to `config.yaml` and edit values for your environment.
+
+admin_steamid: "[U:1:YOUR_STEAM_ACCOUNT_ID]"
+log_dir: "D:\\cs2-ds\\game\\csgo\\logs"
+max_rounds: 24
+taunt_chance: 0.25
+
+available_maps:
+  - dust2
+  - inferno
+  - ancient
+  - mirage
+
+silence_seconds: 30
+idle_comment_seconds: 30
+commentary_cooldown_seconds: 10
+score_flow_cooldown_seconds: 8
+round_context_enabled: false

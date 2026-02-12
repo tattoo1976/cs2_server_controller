@@ -1,0 +1,20 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Local tooling cache
+.mypy_cache/
+
+# Runtime artifacts
+match.log
+
+# Local/private runtime config
+config.yaml
+
+# Local/private data
+targets.json
+player_stats.json
+player_elo.json
+
+# Optional local launch scripts
+*.bat
