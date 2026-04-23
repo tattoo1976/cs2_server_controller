@@ -13,6 +13,7 @@ py -3 launcher.py
 ```
 
 `launcher.py` restarts `controller.py` after exit.
+It uses `sys.executable`, so it runs with the same Python interpreter used to start `launcher.py`.
 
 ## 2. Important Files
 
@@ -30,6 +31,7 @@ py -3 launcher.py
 Main keys:
 
 - `admin_steamid`
+- `server_password`
 - `log_dir`
 - `max_rounds`
 - `taunt_chance`
@@ -66,7 +68,6 @@ Common:
 - `!top elo`
 - `!stats [name]`
 - `!tactics`
-- `!eloshuffle`
 - `!smartshuffle`
 - `!balancecheck`
 - `!simulate`
@@ -77,6 +78,12 @@ Admin only (`admin_steamid`):
 - `!reset`
 - `!cancel`
 - `!omikuji reset`
+
+Notes for team shuffle:
+
+- `!smartshuffle` targets only currently connected non-bot players (`status` based).
+- If a connected player has no ELO entry yet, they are initialized to `1000`.
+- Team assignment attempts RCON `mp_team_assign "<steamid>" <ct|t>` (plugin-enabled servers), then `mp_restartgame 3`. Players are also instructed via chat to use `jointeam 2` (CT) or `jointeam 3` (T).
 
 ## 5. Logs and Health
 
@@ -107,6 +114,6 @@ Admin only (`admin_steamid`):
 ## 7. Verification
 
 ```powershell
-py -3 -m py_compile controller.py messages.py cheers.py
-py -3 -m unittest -v test_controller.py test_persistence.py
+py -3 -m py_compile controller.py messages.py cheers.py tactics.py launcher.py
+py -3 -m unittest -q
 ```

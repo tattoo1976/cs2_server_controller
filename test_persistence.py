@@ -56,13 +56,13 @@ class PersistenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             targets_path = Path(td) / "targets.json"
             targets_path.write_text(
-                json.dumps({"test_user": "[U:1:100000]"}, ensure_ascii=False),
+                json.dumps({"tattoo": "[U:1:6111605]"}, ensure_ascii=False),
                 encoding="utf-8",
             )
             with mock.patch.object(player_stats, "TARGETS_FILE", str(targets_path)):
                 player_stats.TARGETS.clear()
                 player_stats.load_targets()
-                self.assertIn("TEST_USER", player_stats.TARGETS)
+                self.assertIn("TATTOO", player_stats.TARGETS)
 
 
 if __name__ == "__main__":

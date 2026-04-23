@@ -100,6 +100,21 @@ def get_all_elo() -> Dict[str, int]:
     return PLAYER_ELO.copy()
 
 
+def ensure_players_initialized(players: list[str], default_elo: int = 1000) -> list[str]:
+    """Ensure players exist in ELO table; return newly added names."""
+    added: list[str] = []
+    for player in players:
+        name = player.upper()
+        if is_bot(name):
+            continue
+        if name not in PLAYER_ELO:
+            PLAYER_ELO[name] = default_elo
+            added.append(name)
+    if added:
+        save_elo()
+    return added
+
+
 def is_bot(name: str) -> bool:
     u = name.upper()
     return u.startswith("BOT") or u == "BOT"

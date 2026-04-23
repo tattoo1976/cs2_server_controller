@@ -1,12 +1,12 @@
-CHEER_MESSAGES = [
+﻿CHEER_MESSAGES = [
     "{player}、ここで1本取り切りたい。",
     "{player}、落ち着いていこう。",
-    "{player}、勝負どころだ。",
-    "{player}、今の判断いいぞ。",
-    "{player}、次の当たりに備えよう。",
-    "{player}、丁寧に前進したい。",
-    "{player}、ここは集中していこう。",
-    "{player}、流れを引き寄せたい。",
+    "{player}、ここが勝負どころ。",
+    "{player}、次の判断が大事。",
+    "{player}、人数有利を作りたい。",
+    "{player}、このラウンドを掴めるか。",
+    "{player}、集中していこう。",
+    "{player}、流れを変えるキルが欲しい。",
 ]
 
 ONE_VS_ONE_MESSAGES = [
@@ -17,42 +17,42 @@ ONE_VS_ONE_MESSAGES = [
 ]
 
 CLUTCH_MESSAGES = [
-    "{player} が1v{count}のクラッチに挑戦。",
-    "{player}、厳しい1v{count}を背負った。",
+    "{player} が 1v{count} のクラッチに挑戦。",
+    "{player}、厳しい 1v{count} を背負った。",
     "{player} vs {count}、ここから逆転なるか。",
-    "{player}の1v{count}、見せ場の時間だ。",
-    "勝負は {player} のクラッチ次第。",
+    "{player} の 1v{count}、見せ場の時間だ。",
+    "注目は {player} のクラッチ判断。",
 ]
 
 KILL_STREAK_MESSAGES = {
     2: [
-        "{player} が2キル、勢いが出てきた。",
-        "{player} 連続キルで主導権を握る。",
-        "{player} の2連続キル。",
+        "{player} の2キル、勢いが出てきた。",
+        "{player} 連続キルで主導権。",
+        "{player}、2連取でラウンド優勢。",
     ],
     3: [
-        "{player} が3キル、止まらない。",
-        "{player} キルマシーン状態。",
+        "{player} の3キル、止まらない。",
+        "{player}、キルマシーン状態。",
         "{player} の3連キルで流れを作る。",
     ],
     4: [
-        "{player} が4キル、あと1人。",
+        "{player} の4キル、あと1人。",
         "{player} がラウンドを支配している。",
-        "{player} 4人抜き、圧巻。",
+        "{player}、4人抜き。ACEなるか。",
     ],
 }
 
 ACE_MESSAGES = [
     "{player} がACE達成！",
-    "{player} の5キル、完璧なラウンド。",
-    "{player} が全員をなぎ倒した。",
-    "{player} ACE、会場が沸く。",
+    "{player} の5キル、完璧なラウンド！",
+    "{player} が全員をなぎ倒した！",
+    "{player}、圧巻のACE！",
 ]
 
 HEADSHOT_STREAK_MESSAGES = [
     "{player}、ヘッドショットが止まらない。",
     "{player} のHS連発、精度が高い。",
-    "{player} が3連続ヘッドショット。",
+    "{player}、連続ヘッドショット！",
 ]
 
 TEAM_KILL_MESSAGES = [
@@ -63,9 +63,11 @@ TEAM_KILL_MESSAGES = [
 
 HELP_MESSAGES = [
     "使えるコマンド:",
-    "!help - このヘルプを表示",
+    "!help - ヘルプを表示",
     "!coin - コイントス",
-    "!shuffle - チームシャッフル",
+    "!shuffle - チームをランダムシャッフル",
+    "!pause - 次のラウンド開始時にポーズ",
+    "!unpause - ポーズ解除",
     "!omikuji - 今日の運勢とラッキー武器",
     "!tactics - 現在マップの戦術ヒント",
     "!rdy - チームの準備完了を宣言",
@@ -75,24 +77,41 @@ HELP_MESSAGES = [
 HELP_MESSAGES_ADMIN = [
     "!cancel - 試合開始をキャンセル（管理者）",
     "!rcon <command> - RCONコマンド実行（管理者）",
-    "!eloshuffle - Elo基準でチーム分け",
-    "!smartshuffle - バランス重視でチーム分け",
-    "!balancecheck - 現在チームのElo差確認",
-    "!simulate - 現在構成での勝率予測",
-    "!top - 勝率ランキング表示",
-    "!top elo - Eloランキング表示",
+    "!smartshuffle - ELO差最小でチーム分け",
+    "!kdshuffle - K/D差最小でチーム分け",
+    "!kd [name] - K/D確認",
+    "!top kd - K/Dランキング",
+    "!balancecheck - 現在チームのELO差を確認",
+    "!simulate - 現在編成の勝率予測",
+    "!top - 勝率ランキング",
+    "!top elo - ELOランキング",
     "!stats [name] - 戦績表示",
-    "!elo [name] - Elo表示",
+    "!elo [name] - ELO表示",
     "!omikuji reset - おみくじ履歴リセット（管理者）",
 ]
 
 OMIKUJI_RESULTS = [
-    "大吉: 今日は強気に行ける日。",
-    "中吉: 安定したプレーが光る日。",
-    "小吉: 丁寧に進めれば勝機あり。",
-    "末吉: 無理せず連携重視で。",
-    "凶: 慎重な判断が必要な日。",
-    "大凶: 焦らず一つずつ積み上げよう。",
+    "大吉: 今日は強気に攻める日。",
+    "大吉: エントリーがハマる流れ。先手で主導権を取れる。",
+    "大吉: 勝負所の撃ち合いで運が味方する。",
+    "大吉: 1vXでも冷静に判断できる日。",
+    "中吉: 丁寧なプレーが光る日。",
+    "中吉: カバー意識でチームに貢献できる。",
+    "中吉: セットプレーの連携が噛み合う。",
+    "中吉: 無理せずいけば安定して勝てる。",
+    "小吉: 焦らずいけば勝機あり。",
+    "小吉: 中盤の判断が勝敗を左右する。",
+    "小吉: 丁寧なクリアリングで流れを作れる。",
+    "小吉: 1本ずつ積み上げる展開が吉。",
+    "末吉: 連携を意識して前進。",
+    "末吉: 報告とカバーで試合を整える日。",
+    "末吉: 役割を徹底すると結果がついてくる。",
+    "凶: 慎重な立ち回りが必要。",
+    "凶: 単独行動は控えて味方と動こう。",
+    "凶: ピークは一拍置いてから。",
+    "大凶: 一つずつ丁寧に積み上げよう。",
+    "大凶: 今日は耐える日。無理な勝負は禁物。",
+    "大凶: リスク管理を最優先でいこう。",
 ]
 
 LUCKY_WEAPONS = [
@@ -102,24 +121,27 @@ LUCKY_WEAPONS = [
 ]
 
 ACCOLADE_MESSAGES = {
-    "5k": "{player} が1ラウンドで{value}キル！圧巻のパフォーマンス。",
-    "knifekills": "{player} がナイフキルを決めた！",
-    "bombcarrierkills": "{player} が爆弾キャリアーを仕留めた。",
-    "3k": "{player} が3キルでラウンドを引き寄せた。",
-    "mvps": "{player} がMVPを獲得。",
+    "5k": "{player} がこのラウンドで{value}キル。圧巻のパフォーマンス。",
+    "knifekills": "{player} がナイフキルを決めた。",
+    "bombcarrierkills": "{player} が爆弾キャリアーをキル。",
+    "3k": "{player} が3キルでラウンドを大きく動かした。",
+    "mvps": "{player} がMVPを{value}回獲得。",
     "adr": "{player} の平均ダメージは {value}。",
-    "firstkills": "{player} がファーストキルを {value} 回獲得。",
-    "cashspent": "{player} が積極投資で勝負。",
-    "deaths": "{player} は厳しい展開でも最後まで戦った。",
+    "firstkills": "{player} がファーストキルを{value}回獲得。",
+    "cashspent": "{player} の総消費金額は {value}。",
+    "deaths": "{player} は {value}デス。次は取り返したい。",
     "gimme_10": "{player} が10キル未満。次に期待。",
 }
 
 
 def get_accolade_message(accolade_type, player, value):
-    if accolade_type in ACCOLADE_MESSAGES:
-        msg = ACCOLADE_MESSAGES[accolade_type]
+    key = (accolade_type or "").strip().lower()
+    if key in ACCOLADE_MESSAGES:
+        msg = ACCOLADE_MESSAGES[key]
         return msg.format(
             player=player,
             value=int(value) if value.is_integer() else round(value, 1),
         )
-    return None
+    # Unknown accolade types are still announced to avoid silent drops.
+    shown = int(value) if value.is_integer() else round(value, 1)
+    return f"{player} の {accolade_type}: {shown}"

@@ -18,6 +18,7 @@ from cheers import (
     ACE_MESSAGES,
     CHEER_MESSAGES,
     CLUTCH_MESSAGES,
+    ONE_VS_ONE_MESSAGES,
     HEADSHOT_STREAK_MESSAGES,
     KILL_STREAK_MESSAGES,
     TEAM_KILL_MESSAGES,
@@ -27,8 +28,14 @@ from cheers import (
     LUCKY_WEAPONS,
     get_accolade_message,
 )
-from messages import ROUND_EVENTS, SILENCE_MESSAGES, ONE_V_ONE_MESSAGES, SCORE_FLOW_MESSAGES, ROUND_CONTEXT_MESSAGES
-from player_elo import get_all_elo, get_elo, load_elo, save_elo, update_elo
+from messages import (
+    ROUND_EVENTS,
+    SILENCE_MESSAGES,
+    SCORE_FLOW_MESSAGES,
+    ROUND_CONTEXT_MESSAGES,
+    OPENING_PLAYER_DUEL_MESSAGES,
+)
+from player_elo import get_all_elo, get_elo, load_elo, save_elo, update_elo, ensure_players_initialized
 from player_stats import (
     PLAYER_STATS,
     TARGETS,
@@ -37,6 +44,11 @@ from player_stats import (
     save_stats,
     save_targets,
     is_bot,
+    increment_kills,
+    increment_deaths,
+    get_kills,
+    get_deaths,
+    get_kd_ratio,
 )
 from state import MatchState
 from runtime_config import RuntimeConfig, load_runtime_config
@@ -44,9 +56,9 @@ from taunts import TAUNT_MESSAGES
 from tactics import get_tactic, normalize_map_name
 from team_utils import (
     assign_teams,
-    elo_shuffle,
     predict_winrate,
     smart_shuffle_balanced,
+    kd_shuffle_balanced,
 )
 
 PLAYER_TEAM_RE = re.compile(r'"(?P<name>[^<]+)<\d+><(?P<steam_id>[^>]+)><(?P<team>CT|TERRORIST)>"')
@@ -99,6 +111,7 @@ GAME_OVER_RE = re.compile(r'Game Over: .*?score\s+(\d+):(\d+)', re.IGNORECASE)
 TEAM_ASSIGN_RE = re.compile(
     r'"(?P<name>.+?)<\d+><(?P<steam_id>[^>]+)><[^>]*>" joined team "(?P<team>CT|TERRORIST)"'
 )
+STEAM_ID_RE = re.compile(r"^\[U:1:\d+\]$")
 
 CHAT_RE = re.compile(
     r'"(?P<name>.+?)<\d+><(?P<steamid>\[U:1:(?P<accountid>\d+)\])><(?P<team>\w+)>" say "(?P<text>.+)"'
@@ -106,6 +119,13 @@ CHAT_RE = re.compile(
 
 TEAM_T = "TERRORIST"
 TEAM_CT = "CT"
+WARMUP_GUIDE_INTERVAL_SECONDS = 60
+WARMUP_GUIDE_MESSAGES = [
+    "使えるコマンドは !help で確認できます",
+    "試合開始は両チーム !rdy のあと !lo3 です",
+    "マップ変更は !map dust2 のように入力してください",
+    "チーム分けは !shuffle で実行できます",
+]
 
 
 class Controller:
@@ -123,7 +143,10 @@ class Controller:
     ) -> None:
         """Documentation."""
         self.rcon = rcon_func
-        self.say = say_func
+        self._say_raw = say_func
+        self._last_say_at = 0.0
+        self._min_say_interval_seconds = 0.35
+        self.say = self._say_throttled
         self.state = state or MatchState()
         self.settings = settings or load_runtime_config()
         self.state.WIN_ROUNDS = self.settings.max_rounds // 2 + 1
@@ -131,6 +154,15 @@ class Controller:
         self.in_json_block: bool = False
         self.event_handlers: List[tuple[re.Pattern[str], Callable[[re.Match[str], str], None]]] = []
         self.setup_event_listeners()
+
+    def _say_throttled(self, msg: str) -> None:
+        """Throttle chat output to avoid command/message queue bursts."""
+        now = time.time()
+        wait = self._min_say_interval_seconds - (now - self._last_say_at)
+        if wait > 0:
+            time.sleep(wait)
+        self._say_raw(msg)
+        self._last_say_at = time.time()
 
     def setup_event_listeners(self) -> None:
         """Initialize the log event dispatcher table."""
@@ -155,6 +187,16 @@ class Controller:
             self.rcon("echo controller_ready")
         except Exception:
             logger.exception("RCON health-check failed")
+
+    def apply_server_password(self) -> None:
+        """Apply join password via RCON if configured."""
+        pw = (self.settings.server_password or "").strip()
+        if not pw:
+            logger.info("server password is empty; password join is disabled")
+            return
+        safe = pw.replace('"', "")
+        self.rcon(f'sv_password "{safe}"')
+        logger.info("server password has been applied")
 
     def reset_command_flags(self) -> None:
         """Reset transient command flags after a map change."""
@@ -186,19 +228,117 @@ class Controller:
         ]
         return random.choice(candidates) if candidates else None
 
-    def parse_status_output(self, output: str) -> None:
+    def parse_status_output(self, output: str) -> set[str]:
         """Documentation."""
         logger.debug("parse_status_output start")
+        current_name_to_steam: Dict[str, str] = {}
+        current_steam_to_name: Dict[str, str] = {}
         for line in output.splitlines():
             match = STATUS_RE.match(line)
             if match:
                 name = match.group("name")
                 steam_id = f"[{match.group('steam_id')}]"
                 TARGETS[name.upper()] = steam_id
-                self.state.name_to_steam[name] = steam_id
-                self.state.steam_to_name[steam_id] = name
+                current_name_to_steam[name] = steam_id
+                current_steam_to_name[steam_id] = name
+        if current_name_to_steam:
+            self.state.name_to_steam = current_name_to_steam
+            self.state.steam_to_name = current_steam_to_name
         save_targets()
         logger.info("rcon status から TARGETS を更新しました")
+        return set(current_name_to_steam.keys())
+
+    def get_connected_players(self) -> List[str]:
+        """Return currently connected non-bot players in normalized form."""
+        return sorted(self._refresh_connected_player_names())
+
+    def _apply_team_shuffle(self, team_ct: List[str], team_t: List[str], label: str) -> None:
+        """Announce teams, attempt RCON assignment, and restart."""
+        self.say(f"CT ({label}): " + ", ".join(team_ct))
+        self.say(f"T ({label}): " + ", ".join(team_t))
+        # Disable auto-balance so manual team selections survive the restart.
+        self.rcon("mp_autoteambalance 0")
+        self.rcon("mp_limitteams 0")
+        # Best-effort RCON assignment (works on plugin-enabled servers).
+        assign_teams(team_ct, team_t, self.rcon, self._resolve_player_steam_id)
+        # Tell players which team to join in case RCON assignment has no effect.
+        self.say("チーム移動: CT -> jointeam 2 / T -> jointeam 3 をコンソールで入力")
+        self.rcon("mp_restartgame 3")
+
+    def _refresh_connected_player_names(self) -> set[str]:
+        """Refresh status and return currently connected non-bot names (upper-cased)."""
+        output = self.rcon("status")
+        if not output:
+            return set()
+        names = self.parse_status_output(output)
+        return {name.upper() for name in names if not is_bot(name)}
+
+    def _resolve_player_steam_id(self, player_name: str) -> Optional[str]:
+        """Resolve a valid SteamID from runtime mappings/targets."""
+        steam_id = self.state.name_to_steam.get(player_name) or TARGETS.get(player_name.upper())
+        if steam_id and STEAM_ID_RE.match(steam_id):
+            return steam_id
+        return None
+
+    def _is_bot_player(self, player_name: str, steam_id: Optional[str] = None) -> bool:
+        """Detect bots by steam id first, then by conventional BOT name prefix."""
+        if steam_id == "BOT":
+            return True
+        resolved = steam_id or self.state.name_to_steam.get(player_name) or TARGETS.get(player_name.upper())
+        if resolved == "BOT":
+            return True
+        return player_name.upper().startswith("BOT")
+
+    def _canonical_player_name(self, player_name: str, steam_id: Optional[str] = None) -> str:
+        """Return a stable display name for a player, preferring steam-id mapping."""
+        if steam_id:
+            mapped = self.state.steam_to_name.get(steam_id)
+            if mapped:
+                return mapped
+            for known_name, known_steam in self.state.name_to_steam.items():
+                if known_steam == steam_id:
+                    return known_name
+        return player_name
+
+    @staticmethod
+    def _discard_case_insensitive(name_set: set[str], target_name: str) -> None:
+        upper = target_name.upper()
+        for existing in [n for n in name_set if n.upper() == upper]:
+            name_set.discard(existing)
+
+    def _add_alive_player(self, team: str, name: str, steam_id: Optional[str] = None) -> None:
+        canonical = self._canonical_player_name(name, steam_id)
+        if team == TEAM_CT:
+            self._discard_case_insensitive(self.state.alive_ct, canonical)
+            self._discard_case_insensitive(self.state.alive_t, canonical)
+            self.state.alive_ct.add(canonical)
+        elif team == TEAM_T:
+            self._discard_case_insensitive(self.state.alive_t, canonical)
+            self._discard_case_insensitive(self.state.alive_ct, canonical)
+            self.state.alive_t.add(canonical)
+
+    def _discard_alive_player(self, team: str, name: str, steam_id: Optional[str] = None) -> None:
+        canonical = self._canonical_player_name(name, steam_id)
+        if team == TEAM_CT:
+            self._discard_case_insensitive(self.state.alive_ct, canonical)
+            self._discard_case_insensitive(self.state.alive_ct, name)
+        elif team == TEAM_T:
+            self._discard_case_insensitive(self.state.alive_t, canonical)
+            self._discard_case_insensitive(self.state.alive_t, name)
+        else:
+            self._discard_case_insensitive(self.state.alive_ct, canonical)
+            self._discard_case_insensitive(self.state.alive_t, canonical)
+            self._discard_case_insensitive(self.state.alive_ct, name)
+            self._discard_case_insensitive(self.state.alive_t, name)
+
+    def _backfill_player_stats_steam_id(self, player_name: str, steam_id: str) -> None:
+        """Keep PLAYER_STATS steam_id populated for later result aggregation."""
+        if not (player_name and steam_id and STEAM_ID_RE.match(steam_id)):
+            return
+        name = player_name.upper()
+        stats = PLAYER_STATS.setdefault(name, {"wins": 0, "losses": 0})
+        if stats.get("steam_id") != steam_id:
+            stats["steam_id"] = steam_id
 
     def today_str(self) -> str:
         """Documentation."""
@@ -514,10 +654,56 @@ class Controller:
         else:
             self.say("試合終了")
 
+    def _announce_opening_player_duel(self) -> None:
+        """Announce one highlighted player from each team at match start."""
+        ct_candidates = sorted(self.state.alive_ct)
+        t_candidates = sorted(self.state.alive_t)
+        if not ct_candidates or not t_candidates:
+            return
+
+        ct_player = random.choice(ct_candidates)
+        t_player = random.choice(t_candidates)
+        template = random.choice(OPENING_PLAYER_DUEL_MESSAGES)
+        self.say(template.format(ct_player=ct_player, t_player=t_player))
+
     def handle_round_start(self, line: str) -> None:
         """Documentation."""
         if not self.state.live_started:
             return
+
+        if self.state.pause_requested:
+            self.state.pause_requested = False
+            self.rcon("mp_pause_match")
+            self.say("試合をポーズしました。再開は !unpause で")
+
+        # Rebuild alive players from current team assignments at each round start.
+        # This prevents stale/incomplete alive sets from causing false clutch/1v1 calls.
+        self.state.alive_ct = {
+            name
+            for name, team in self.state.player_teams.items()
+            if team == TEAM_CT and not self._is_bot_player(name)
+        }
+        self.state.alive_t = {
+            name
+            for name, team in self.state.player_teams.items()
+            if team == TEAM_T and not self._is_bot_player(name)
+        }
+        if not self.state.alive_ct and not self.state.alive_t:
+            self.state.alive_ct = {
+                name
+                for name, team in self.state.temp_player_teams.items()
+                if team == TEAM_CT and not self._is_bot_player(name)
+            }
+            self.state.alive_t = {
+                name
+                for name, team in self.state.temp_player_teams.items()
+                if team == TEAM_T and not self._is_bot_player(name)
+            }
+
+        connected_upper = self._refresh_connected_player_names()
+        if connected_upper:
+            self.state.alive_ct = {name for name in self.state.alive_ct if name.upper() in connected_upper}
+            self.state.alive_t = {name for name in self.state.alive_t if name.upper() in connected_upper}
 
         self.state.round_start_time = time.time()
         self.state.headshot_kills.clear()
@@ -526,8 +712,6 @@ class Controller:
         self.state.round_weapons_ct.clear()
         self.state.round_weapons_t.clear()
         self.state.round_comment_keys.clear()
-        self.state.alive_ct.clear()
-        self.state.alive_t.clear()
         self.state.clutch_active = False
         self.state.clutch_player = None
         self.state.clutch_enemy_count = 0
@@ -542,6 +726,7 @@ class Controller:
 
         if self.state.round_number == 1 and self.state.live_started and not self.state.first_round_announced:
             self.say(random.choice(ROUND_EVENTS.get("first_round", [])))
+            self._announce_opening_player_duel()
             self.state.first_round_announced = True
 
         self._maybe_announce_side_switch()
@@ -561,7 +746,7 @@ class Controller:
             if not self.state.one_v_one_announced:
                 self.state.clutch_active = True
                 self.state.one_v_one_announced = True
-                self.say("1v1！最終決戦！")
+                self.say(random.choice(ONE_VS_ONE_MESSAGES))
                 self.debug_print("[CLUTCH] 1v1 situation entered")
             return
 
@@ -569,16 +754,22 @@ class Controller:
             return
 
         if ct_alive == 1 and t_alive >= 2:
+            candidates = [p for p in self.state.alive_ct if not self._is_bot_player(p)]
+            if not candidates:
+                return
             self.state.clutch_active = True
-            self.state.clutch_player = list(self.state.alive_ct)[0]
+            self.state.clutch_player = candidates[0]
             self.state.clutch_enemy_count = t_alive
             self.say(random.choice(CLUTCH_MESSAGES).format(player=self.state.clutch_player, count=t_alive))
             self.debug_print(f"[CLUTCH] {self.state.clutch_player} (CT) vs {t_alive} T")
             return
 
         if t_alive == 1 and ct_alive >= 2:
+            candidates = [p for p in self.state.alive_t if not self._is_bot_player(p)]
+            if not candidates:
+                return
             self.state.clutch_active = True
-            self.state.clutch_player = list(self.state.alive_t)[0]
+            self.state.clutch_player = candidates[0]
             self.state.clutch_enemy_count = ct_alive
             self.say(random.choice(CLUTCH_MESSAGES).format(player=self.state.clutch_player, count=ct_alive))
             self.debug_print(f"[CLUTCH] {self.state.clutch_player} (T) vs {ct_alive} CT")
@@ -587,6 +778,30 @@ class Controller:
     def should_commentate(self) -> bool:
         """Documentation."""
         return self.state.commentary_enabled and self.state.live_started
+
+    def _get_personal_taunts(self, player_name: str) -> List[str]:
+        """Resolve personal taunts with tolerant name matching."""
+        raw = player_name.strip()
+        upper = raw.upper()
+
+        direct = TAUNT_MESSAGES.get(upper)
+        if direct:
+            return direct
+
+        # Fallback: compare alnum-only normalized keys to absorb tags/spaces/symbols.
+        norm = re.sub(r"[^A-Z0-9]+", "", upper)
+        if not norm:
+            return []
+
+        for key, msgs in TAUNT_MESSAGES.items():
+            if key == "__DEFAULT__":
+                continue
+            key_norm = re.sub(r"[^A-Z0-9]+", "", key.upper())
+            if key_norm and (key_norm == norm or key_norm in norm or norm in key_norm):
+                return msgs
+
+        return []
+
     def check_silence(self):
         if not self.should_commentate():
             return
@@ -633,6 +848,40 @@ class Controller:
 
         weapon = match.group("weapon")
 
+        # Keep alive sets accurate regardless of commentary toggle.
+        if victim_steam_id == "BOT":
+            vt = victim_team
+        else:
+            vt = self.get_team(victim_steam_id)
+        if vt == TEAM_CT:
+            self._discard_alive_player(TEAM_CT, victim, victim_steam_id)
+        elif vt == TEAM_T:
+            self._discard_alive_player(TEAM_T, victim, victim_steam_id)
+        else:
+            self._discard_alive_player("UNKNOWN", victim, victim_steam_id)
+            self.debug_print(f"[WARN] victim team unknown: {victim} ({victim_steam_id})")
+
+        killer_is_bot = self._is_bot_player(killer, killer_steam_id)
+        victim_is_bot = self._is_bot_player(victim, victim_steam_id)
+        is_teamkill = (killer_team == victim_team)
+
+        if self.state.live_started:
+            if not victim_is_bot:
+                increment_deaths(victim)
+            if not killer_is_bot and not is_teamkill:
+                increment_kills(killer)
+
+        if killer_is_bot:
+            kt = "UNKNOWN"
+        else:
+            kt = self.get_team(killer_steam_id)
+        if kt == TEAM_CT:
+            self._add_alive_player(TEAM_CT, killer, killer_steam_id)
+        elif kt == TEAM_T:
+            self._add_alive_player(TEAM_T, killer, killer_steam_id)
+        else:
+            self.debug_print(f"[WARN] killer team unknown: {killer} ({killer_steam_id})")
+
         if self.should_commentate():
             if self.state.round_start_time and time.time() - self.state.round_start_time <= 15:
                 self.say(f"{victim} が開幕15秒以内にダウン")
@@ -650,40 +899,22 @@ class Controller:
                 self.say(message)
                 return
 
-            if victim_steam_id == "BOT":
-                vt = victim_team
-            else:
-                vt = self.get_team(victim_steam_id)
-
-            if vt == "CT":
-                self.state.alive_ct.discard(victim)
-            elif vt == "TERRORIST":
-                self.state.alive_t.discard(victim)
-            else:
-                self.debug_print(f"[WARN] victim team unknown: {victim} ({victim_steam_id})")
-
-            if killer_steam_id == "BOT":
-                kt = killer_team
-            else:
-                kt = self.get_team(killer_steam_id)
-
-            if kt == "CT":
-                self.state.alive_ct.add(killer)
+            if kt == TEAM_CT and not killer_is_bot:
+                self._add_alive_player(TEAM_CT, killer, killer_steam_id)
                 self.state.round_weapons_ct.add(weapon.lower())
-            elif kt == "TERRORIST":
-                self.state.alive_t.add(killer)
+            elif kt == TEAM_T and not killer_is_bot:
+                self._add_alive_player(TEAM_T, killer, killer_steam_id)
                 self.state.round_weapons_t.add(weapon.lower())
-            else:
-                self.debug_print(f"[WARN] killer team unknown: {killer} ({killer_steam_id})")
 
             self.state.kill_streaks[killer] = self.state.kill_streaks.get(killer, 0) + 1
             streak = self.state.kill_streaks[killer]
 
             if streak in KILL_STREAK_MESSAGES:
                 # At 3-kill streak, prefer a player-specific taunt by probability.
-                if streak == 3 and killer.upper() in TAUNT_MESSAGES:
-                    if random.random() < self.settings.taunt_chance:
-                        self.say(random.choice(TAUNT_MESSAGES[killer.upper()]))
+                if streak == 3:
+                    personal = self._get_personal_taunts(killer)
+                    if personal:
+                        self.say(random.choice(personal))
                     else:
                         message = random.choice(KILL_STREAK_MESSAGES[streak]).format(player=killer)
                         self.say(message)
@@ -792,7 +1023,7 @@ class Controller:
                     self.say(f"'{selected}' はサポート外のマップです")
             return
 
-        if cmd == "coin":
+        if cmd in ("coin", "cointos"):
             if self.state.coin_used:
                 self.say("コイントスは既に実施済みです")
             else:
@@ -855,6 +1086,10 @@ class Controller:
             self.state.match_finished = False
             self.state.live_started = True
             self.say("試合を Live on 3 で開始します")
+            self.rcon(f"mp_maxrounds {self.settings.max_rounds}")
+            self.rcon("mp_match_can_clinch 1")
+            self.rcon("mp_overtime_enable 1")
+            self.rcon("mp_overtime_maxrounds 6")
             self.rcon("mp_warmup_end")
             load_stats()
             load_elo()
@@ -902,6 +1137,23 @@ class Controller:
                 self.state.player_teams = self.state.temp_player_teams.copy()
             else:
                 self.say("このコマンドは管理者専用です")
+            return
+
+        if cmd == "pause":
+            if not self.state.live_started:
+                self.say("試合中のみ使用できます")
+                return
+            if self.state.pause_requested:
+                self.say("すでにポーズ予約済みです")
+                return
+            self.state.pause_requested = True
+            self.say("次のラウンド開始時にポーズします")
+            return
+
+        if cmd == "unpause":
+            self.state.pause_requested = False
+            self.rcon("mp_unpause_match")
+            self.say("試合を再開します")
             return
 
         if cmd == "shuffle":
@@ -962,17 +1214,27 @@ class Controller:
             self.say(f"{target} の現在ELOは {rating}")
             return
 
-        if cmd == "eloshuffle":
-            players = list(TARGETS.keys())
-            if len(players) < 2:
-                self.say("プレイヤー数が足りません")
+        if cmd == "kd":
+            target = arg.strip().upper() or player.upper()
+            k = get_kills(target)
+            d = get_deaths(target)
+            ratio = get_kd_ratio(target)
+            self.say(f"{target} K/D: {k}K {d}D ({ratio:.2f})")
+            return
+
+        if cmd == "top" and arg.strip().lower() == "kd":
+            entries = [
+                (name, get_kills(name), get_deaths(name), get_kd_ratio(name))
+                for name in PLAYER_STATS
+                if not is_bot(name) and (get_kills(name) + get_deaths(name)) > 0
+            ]
+            if not entries:
+                self.say("K/Dデータがありません")
                 return
-
-            team_ct, team_t = elo_shuffle(players)
-            self.say("CT (Elo): " + ", ".join(team_ct))
-            self.say("T (Elo): " + ", ".join(team_t))
-
-            assign_teams(team_ct, team_t)
+            ranked = sorted(entries, key=lambda x: x[3], reverse=True)
+            self.say("K/Dランキング TOP5")
+            for i, (name, k, d, ratio) in enumerate(ranked[:5], 1):
+                self.say(f"{i}. {name} - {ratio:.2f} ({k}K {d}D)")
             return
 
         if cmd == "top" and arg.strip().lower() == "elo":
@@ -988,16 +1250,26 @@ class Controller:
                 self.say(f"{i}. {player} - Elo {elo}")
             return
 
-        if cmd == "smartshuffle":
-            players = list(TARGETS.keys())
+        if cmd == "kdshuffle":
+            players = self.get_connected_players()
             if len(players) < 2:
-                self.say("プレイヤー数が足りません")
+                self.say("接続中プレイヤー数が足りません")
+                return
+            team_ct, team_t = kd_shuffle_balanced(players)
+            self._apply_team_shuffle(team_ct, team_t, label="KD")
+            return
+
+        if cmd == "smartshuffle":
+            players = self.get_connected_players()
+            if len(players) < 2:
+                self.say("接続中プレイヤー数が足りません")
                 return
 
+            added = ensure_players_initialized(players, 1000)
+            if added:
+                logger.info("ELO初期値を追加: %s", ", ".join(added))
             team_ct, team_t = smart_shuffle_balanced(players)
-            self.say("CT (Smart): " + ", ".join(team_ct))
-            self.say("T (Smart): " + ", ".join(team_t))
-            assign_teams(team_ct, team_t)
+            self._apply_team_shuffle(team_ct, team_t, label="Smart")
             return
 
         if cmd == "balancecheck":
@@ -1082,7 +1354,7 @@ class Controller:
         if cmd == "tactics":
             map_name = normalize_map_name(self.state.current_map or "de_dust2")
             tactic = get_tactic(team, map_name)
-            self.say(f"{team}蛛ｴ ({map_name}): {tactic}")
+            self.say(f"{team}側 ({map_name}): {tactic}")
             return
 
     def extract_json_content(self, line: str) -> str:
@@ -1112,13 +1384,15 @@ class Controller:
     def _handle_connect_event(self, match: re.Match[str], _line: str) -> None:
         name = match.group("name")
         steam_id = match.group("steam_id")
-        logger.info("CONNECT_RE 荳閾ｴ: %s (%s)", name, steam_id)
+        logger.info("CONNECT_RE 一致: %s (%s)", name, steam_id)
         self.state.name_to_steam[name] = steam_id
         self.state.steam_to_name[steam_id] = name
         TARGETS[name.upper()] = steam_id
-        logger.debug("TARGETS譖ｴ譁ｰ: %s => %s", name.upper(), steam_id)
+        self._backfill_player_stats_steam_id(name, steam_id)
+        logger.debug("TARGETS更新: %s => %s", name.upper(), steam_id)
         try:
             save_targets()
+            save_stats()
             logger.info("TARGETSを保存しました")
         except Exception:
             logger.exception("TARGETS保存に失敗しました")
@@ -1187,9 +1461,22 @@ class Controller:
             )
 
         logger.debug("[DEBUG] CT: %s, T: %s", ct_players, t_players)
-        self.record_match_result(winner, ct_players, t_players)
-        update_elo(winner, ct_players, t_players)
+        tracked_ct = [p for p in ct_players if self._resolve_player_steam_id(p)]
+        tracked_t = [p for p in t_players if self._resolve_player_steam_id(p)]
+        skipped = [p for p in (ct_players + t_players) if not self._resolve_player_steam_id(p)]
+        if skipped:
+            logger.info("SteamID未登録のため結果集計をスキップ: %s", skipped)
+
+        self.record_match_result(winner, tracked_ct, tracked_t)
+        all_tracked = tracked_ct + tracked_t
+        elo_before = {p: get_elo(p) for p in all_tracked}
+        update_elo(winner, tracked_ct, tracked_t)
         save_elo()
+        for p in all_tracked:
+            before = elo_before[p]
+            after = get_elo(p)
+            sign = "+" if after >= before else ""
+            self.say(f"ELO {p}: {sign}{after - before} ({before}→{after})")
 
         logger.info("MATCH END: %s の結果を保存しました", winner)
         if not self.state.accolades:
@@ -1222,6 +1509,7 @@ class Controller:
         self.state.current_map = normalize_map_name(new_map)
         self.setup_event_listeners()
         self.ensure_rcon_alive()
+        self.apply_server_password()
         self.reset_command_flags()
 
     def _handle_chat_command_event(self, match: re.Match[str], _line: str) -> None:
@@ -1232,6 +1520,7 @@ class Controller:
         self.state.temp_player_teams[player_name] = team
         self.state.name_to_steam[player_name] = steam_id
         self.state.steam_to_name[steam_id] = player_name
+        self._backfill_player_stats_steam_id(player_name, steam_id)
         logger.info("CHAT_CMD: %s (%s) [%s]: !%s %s", player_name, team, steam_id, command, arg)
         self.handle_chat_command(player_name, steam_id, team, command, arg)
 
@@ -1239,18 +1528,24 @@ class Controller:
         name = match.group("name")
         steam_id = match.group("steam_id")
         team = match.group("team")
+        if self._is_bot_player(name, steam_id):
+            return
         self.state.temp_player_teams[name] = team
         self.state.player_teams[name] = team
         self.state.name_to_steam[name] = steam_id
         self.state.steam_to_name[steam_id] = name
+        self._backfill_player_stats_steam_id(name, steam_id)
 
     def _handle_team_assign_event(self, match: re.Match[str], _line: str) -> None:
         name = match.group("name")
         steam_id = match.group("steam_id")
         team = match.group("team")
+        if self._is_bot_player(name, steam_id):
+            return
         self.state.player_teams[name] = team
         self.state.name_to_steam[name] = steam_id
         self.state.steam_to_name[steam_id] = name
+        self._backfill_player_stats_steam_id(name, steam_id)
         logger.info("チーム割当: %s (%s) -> %s", name, steam_id, team)
 
     def _handle_disconnect_event(self, match: re.Match[str], _line: str) -> None:
@@ -1338,10 +1633,11 @@ class Controller:
             if is_bot(player):
                 continue
             name = player.upper()
-            steam_id = TARGETS.get(name)
+            steam_id = self._resolve_player_steam_id(player)
+            if not steam_id:
+                continue
             stats = PLAYER_STATS.setdefault(name, {"wins": 0, "losses": 0})
-            if steam_id:
-                stats["steam_id"] = steam_id
+            stats["steam_id"] = steam_id
             if winner == "CT":
                 stats["wins"] += 1
             else:
@@ -1352,10 +1648,11 @@ class Controller:
             if is_bot(player):
                 continue
             name = player.upper()
-            steam_id = TARGETS.get(name)
+            steam_id = self._resolve_player_steam_id(player)
+            if not steam_id:
+                continue
             stats = PLAYER_STATS.setdefault(name, {"wins": 0, "losses": 0})
-            if steam_id:
-                stats["steam_id"] = steam_id
+            stats["steam_id"] = steam_id
             if winner == "TERRORIST":
                 stats["wins"] += 1
             else:
@@ -1371,15 +1668,17 @@ class Controller:
         logger.info("CS2 controller start")
         logger.info("config source: %s", self.settings.config_source)
         logger.info(
-            "runtime settings: max_rounds=%d taunt_chance=%.2f silence=%ds idle=%ds",
+            "runtime settings: max_rounds=%d taunt_chance=%.2f silence=%ds idle=%ds password=%s",
             self.settings.max_rounds,
             self.settings.taunt_chance,
             self.settings.silence_seconds,
             self.settings.idle_comment_seconds,
+            "set" if (self.settings.server_password or "").strip() else "empty",
         )
         load_stats()
         load_elo()
         load_targets()
+        self.apply_server_password()
 
         self.current_log_path = None
         self.log_fp = None
@@ -1407,6 +1706,7 @@ class Controller:
 
             line = self.log_fp.readline()
             if not line:
+                self.check_warmup_guidance()
                 self.check_idle()
                 self.check_silence()
                 time.sleep(0.1)
@@ -1432,6 +1732,22 @@ class Controller:
                     cooldown_seconds=self.settings.commentary_cooldown_seconds,
                 ):
                     self.state.last_kill_time = time.time()
+
+    def check_warmup_guidance(self) -> None:
+        """Send low-frequency command guidance before !lo3."""
+        if self.state.live_started:
+            return
+        if not (self.state.alive_ct or self.state.alive_t or self.state.player_teams):
+            return
+
+        key = "warmup_guide"
+        now = time.time()
+        last_at = self.state.last_comment_at.get(key, 0.0)
+        if now - last_at < WARMUP_GUIDE_INTERVAL_SECONDS:
+            return
+
+        self.say(random.choice(WARMUP_GUIDE_MESSAGES))
+        self.state.last_comment_at[key] = now
 
 
 def main() -> None:

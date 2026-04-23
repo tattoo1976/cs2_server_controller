@@ -103,7 +103,9 @@ def get_steam_id(player: str) -> str | None:
     name = player.upper()
     stats = PLAYER_STATS.get(name)
     if stats:
-        return stats.get("steam_id")
+        steam_id = stats.get("steam_id")
+        if steam_id:
+            return steam_id
     return TARGETS.get(name)
 
 
@@ -111,3 +113,29 @@ def is_bot(player: str) -> bool:
     """Best-effort bot detection."""
     steam_id = get_steam_id(player)
     return steam_id == "BOT" or steam_id is None
+
+
+def increment_kills(player: str) -> None:
+    name = player.upper()
+    stats = PLAYER_STATS.setdefault(name, {})
+    stats["kills"] = stats.get("kills", 0) + 1
+
+
+def increment_deaths(player: str) -> None:
+    name = player.upper()
+    stats = PLAYER_STATS.setdefault(name, {})
+    stats["deaths"] = stats.get("deaths", 0) + 1
+
+
+def get_kills(player: str) -> int:
+    return PLAYER_STATS.get(player.upper(), {}).get("kills", 0)
+
+
+def get_deaths(player: str) -> int:
+    return PLAYER_STATS.get(player.upper(), {}).get("deaths", 0)
+
+
+def get_kd_ratio(player: str) -> float:
+    k = get_kills(player)
+    d = get_deaths(player)
+    return k / d if d > 0 else float(k) if k > 0 else 1.0

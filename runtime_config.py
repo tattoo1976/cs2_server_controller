@@ -4,12 +4,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List
 
-from config import ADMIN_STEAMID, AVAILABLE_MAPS, LOG_DIR, MAX_ROUNDS, TAUNT_CHANCE
+from config import ADMIN_STEAMID, AVAILABLE_MAPS, LOG_DIR, MAX_ROUNDS, TAUNT_CHANCE, SERVER_PASSWORD
 
 
 @dataclass(frozen=True)
 class RuntimeConfig:
     admin_steamid: str = ADMIN_STEAMID
+    server_password: str = SERVER_PASSWORD
     available_maps: List[str] = None  # type: ignore[assignment]
     log_dir: str = LOG_DIR
     max_rounds: int = MAX_ROUNDS
@@ -92,6 +93,7 @@ def load_runtime_config(path: str = "config.yaml") -> RuntimeConfig:
 
     return RuntimeConfig(
         admin_steamid=str(parsed.get("admin_steamid", ADMIN_STEAMID)),
+        server_password=str(parsed.get("server_password", SERVER_PASSWORD)),
         available_maps=list(parsed.get("available_maps", list(AVAILABLE_MAPS))),
         log_dir=str(parsed.get("log_dir", LOG_DIR)),
         max_rounds=int(parsed.get("max_rounds", MAX_ROUNDS)),

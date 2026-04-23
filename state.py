@@ -70,6 +70,7 @@ class MatchState:
 
     # Commands
     chat_commands_enabled: bool = True
+    pause_requested: bool = False
 
     # Temp/team mappings
     temp_player_teams: Dict[str, str] = field(default_factory=dict)
@@ -167,6 +168,7 @@ class MatchState:
         # WIN_ROUNDS remains derived from MAX_ROUNDS
 
         self.chat_commands_enabled = True
+        self.pause_requested = False
 
         self.temp_player_teams.clear()
         self.player_teams.clear()

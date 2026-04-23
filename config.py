@@ -7,10 +7,13 @@ LOG_DIR = r"D:\\path\\to\\cs2\\game\\csgo\\logs"
 # RCON defaults (set your local real values).
 RCON_HOST = "127.0.0.1"
 RCON_PORT = 27015
-RCON_PASSWORD = "CHANGE_ME"
+RCON_PASSWORD = "yougota"
 
 # Admin steam id placeholder.
 ADMIN_STEAMID = "[U:1:YOUR_ACCOUNT_ID]"
+
+# Join password for game server (empty = no password).
+SERVER_PASSWORD = ""
 
 # Match settings.
 MAX_ROUNDS = 24

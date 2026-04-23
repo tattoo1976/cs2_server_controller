@@ -2,7 +2,7 @@ import time
 import unittest
 from unittest import mock
 
-from controller import Controller
+from controller import Controller, KILL_REGEX
 from runtime_config import RuntimeConfig
 from state import MatchState
 from tactics import normalize_map_name
@@ -40,6 +40,14 @@ class ControllerTests(unittest.TestCase):
         self.assertFalse(controller.state.rdy_ct)
         self.assertFalse(controller.state.rdy_t)
 
+    def test_apply_server_password_sends_sv_password(self) -> None:
+        settings = RuntimeConfig(server_password="1122", available_maps=["dust2"])
+        controller, rcon_calls, _ = self.make_controller(settings=settings)
+
+        controller.apply_server_password()
+
+        self.assertIn('sv_password "1122"', rcon_calls)
+
     def test_check_idle_announces_after_30_seconds(self) -> None:
         controller, _, messages = self.make_controller()
         controller.state.live_started = True
@@ -58,12 +66,12 @@ class ControllerTests(unittest.TestCase):
 
         with mock.patch.object(controller, "handle_chat_command") as handler:
             controller.handle_line(
-                'L 01/03/2026 - 18:18:05: "test_user<2><[U:1:100000]><CT>" say "!help hello world"'
+                'L 01/03/2026 - 18:18:05: "tattoo<2><[U:1:6111605]><CT>" say "!help hello world"'
             )
 
         handler.assert_called_once_with(
-            "test_user",
-            "[U:1:100000]",
+            "tattoo",
+            "[U:1:6111605]",
             "CT",
             "help",
             "hello world",
@@ -111,6 +119,53 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(controller.state.player_teams["bob"], "TERRORIST")
         self.assertEqual(messages, [])
 
+    def test_round_start_rebuilds_alive_from_team_assignments(self) -> None:
+        controller, _, _ = self.make_controller()
+        controller.state.live_started = True
+        controller.state.round_number = 2
+        controller.state.player_teams = {
+            "ct1": "CT",
+            "ct2": "CT",
+            "ct3": "CT",
+            "ct4": "CT",
+            "t1": "TERRORIST",
+            "t2": "TERRORIST",
+            "t3": "TERRORIST",
+            "t4": "TERRORIST",
+        }
+        controller.state.alive_ct = {"stale_ct_only"}
+        controller.state.alive_t = {"stale_t_only"}
+
+        controller.handle_round_start("Round_Start")
+
+        self.assertEqual(controller.state.alive_ct, {"ct1", "ct2", "ct3", "ct4"})
+        self.assertEqual(controller.state.alive_t, {"t1", "t2", "t3", "t4"})
+
+    def test_round_start_filters_out_disconnected_players_from_alive_sets(self) -> None:
+        controller, _, _ = self.make_controller()
+        controller.state.live_started = True
+        controller.state.round_number = 2
+        controller.state.player_teams = {
+            "ct1": "CT",
+            "stale_ct": "CT",
+            "t1": "TERRORIST",
+            "stale_t": "TERRORIST",
+        }
+
+        # status contains only ct1 and t1, so stale_* must be pruned.
+        status_output = '\n'.join(
+            [
+                '  1 "ct1" [U:1:111]',
+                '  2 "t1" [U:1:222]',
+            ]
+        )
+        controller.rcon = lambda cmd: status_output if cmd == "status" else ""
+
+        controller.handle_round_start("Round_Start")
+
+        self.assertEqual(controller.state.alive_ct, {"ct1"})
+        self.assertEqual(controller.state.alive_t, {"t1"})
+
     def test_clutch_not_announced_for_1v0(self) -> None:
         controller, _, messages = self.make_controller()
         controller.state.alive_ct = {"ct_one"}
@@ -149,6 +204,62 @@ class ControllerTests(unittest.TestCase):
         self.assertTrue(controller.state.one_v_one_announced)
         self.assertEqual(len(messages), 2)
 
+    def test_bot_killer_is_not_added_to_alive_sets(self) -> None:
+        controller, _, _ = self.make_controller()
+        controller.state.alive_ct = {"ct1"}
+        controller.state.alive_t = {"t1"}
+        line = '"BOT Mike<5><BOT><TERRORIST>" killed "ct1<2><[U:1:111]><CT>" with "ak47"'
+        match = KILL_REGEX.search(line)
+        self.assertIsNotNone(match)
+
+        controller.handle_kill(line, match)  # type: ignore[arg-type]
+
+        self.assertNotIn("BOT Mike", controller.state.alive_t)
+
+    def test_round_start_excludes_bot_named_like_human_via_steamid(self) -> None:
+        controller, _, _ = self.make_controller()
+        controller.state.live_started = True
+        controller.state.round_number = 2
+        controller.state.player_teams = {
+            "Mangos": "CT",
+            "real_ct": "CT",
+            "real_t": "TERRORIST",
+        }
+        controller.state.name_to_steam = {
+            "Mangos": "BOT",
+            "real_ct": "[U:1:111]",
+            "real_t": "[U:1:222]",
+        }
+        status_output = '\n'.join(
+            [
+                '  1 "real_ct" [U:1:111]',
+                '  2 "real_t" [U:1:222]',
+            ]
+        )
+        controller.rcon = lambda cmd: status_output if cmd == "status" else ""
+
+        controller.handle_round_start("Round_Start")
+
+        self.assertNotIn("Mangos", controller.state.alive_ct)
+        self.assertEqual(controller.state.alive_ct, {"real_ct"})
+
+    def test_kill_with_name_case_variation_does_not_duplicate_alive_player(self) -> None:
+        controller, _, _ = self.make_controller()
+        controller.state.alive_ct = {"BRAD"}
+        controller.state.alive_t = {"t1"}
+        controller.state.steam_to_name = {"[U:1:111]": "BRAD", "[U:1:222]": "t1"}
+        controller.state.name_to_steam = {"BRAD": "[U:1:111]", "t1": "[U:1:222]"}
+        controller.state.player_teams = {"BRAD": "CT", "t1": "TERRORIST"}
+
+        line = '"brad<2><[U:1:111]><CT>" killed "t1<3><[U:1:222]><TERRORIST>" with "ak47"'
+        match = KILL_REGEX.search(line)
+        self.assertIsNotNone(match)
+
+        controller.handle_kill(line, match)  # type: ignore[arg-type]
+
+        self.assertEqual(controller.state.alive_ct, {"BRAD"})
+        self.assertEqual(len(controller.state.alive_ct), 1)
+
     def test_score_flow_announces_streak(self) -> None:
         controller, _, messages = self.make_controller()
         controller.state.live_started = True
@@ -186,7 +297,7 @@ class ControllerTests(unittest.TestCase):
 
     def test_map_command_updates_current_map(self) -> None:
         controller, rcon_calls, _ = self.make_controller()
-        controller.handle_chat_command("test_user", "[U:1:100000]", "CT", "map", "mirage")
+        controller.handle_chat_command("tattoo", "[U:1:6111605]", "CT", "map", "mirage")
 
         self.assertEqual(controller.state.current_map, "de_mirage")
         self.assertIn("changelevel de_mirage", rcon_calls)
@@ -196,9 +307,40 @@ class ControllerTests(unittest.TestCase):
         controller.state.current_map = "mirage"
 
         with mock.patch("controller.get_tactic", return_value="TACTIC") as get_tactic_mock:
-            controller.handle_chat_command("test_user", "[U:1:100000]", "CT", "tactics", "")
+            controller.handle_chat_command("tattoo", "[U:1:6111605]", "CT", "tactics", "")
 
         get_tactic_mock.assert_called_once_with("CT", "de_mirage")
+
+    def test_smartshuffle_uses_connected_players_only(self) -> None:
+        fake_status = ' 1 "tattoo" [U:1:6111605] active\n 2 "ton" [U:1:39882348] active\n'
+
+        def rcon_with_status(cmd: str) -> str:
+            return fake_status if cmd == "status" else ""
+
+        controller = Controller(rcon_with_status, lambda msg: None, MatchState())
+
+        with mock.patch.dict(
+            "controller.TARGETS",
+            {
+                "TATTOO": "[U:1:6111605]",
+                "TON": "[U:1:39882348]",
+                "OFFLINE": "[U:1:9999999]",
+            },
+            clear=True,
+        ), mock.patch(
+            "controller.smart_shuffle_balanced",
+            return_value=(["TATTOO"], ["TON"]),
+        ) as smart_mock, mock.patch("controller.assign_teams") as assign_mock, mock.patch(
+            "controller.ensure_players_initialized", return_value=[]
+        ) as ensure_mock:
+            controller.handle_chat_command("tattoo", "[U:1:6111605]", "CT", "smartshuffle", "")
+
+        smart_mock.assert_called_once_with(["TATTOO", "TON"])
+        ensure_mock.assert_called_once_with(["TATTOO", "TON"], 1000)
+        assign_mock.assert_called_once()
+        args, _ = assign_mock.call_args
+        self.assertEqual(args[0], ["TATTOO"])
+        self.assertEqual(args[1], ["TON"])
 
     def test_side_switch_round_uses_runtime_max_rounds(self) -> None:
         settings = RuntimeConfig(max_rounds=30, available_maps=["dust2"])

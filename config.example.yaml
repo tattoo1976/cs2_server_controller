@@ -1,6 +1,7 @@
 # Copy this file to `config.yaml` and edit values for your environment.
 
 admin_steamid: "[U:1:YOUR_STEAM_ACCOUNT_ID]"
+server_password: ""
 log_dir: "D:\\cs2-ds\\game\\csgo\\logs"
 max_rounds: 24
 taunt_chance: 0.25
