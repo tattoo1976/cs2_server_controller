@@ -302,6 +302,13 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(controller.state.current_map, "de_mirage")
         self.assertIn("changelevel de_mirage", rcon_calls)
 
+    def test_map_command_supports_cache(self) -> None:
+        controller, rcon_calls, _ = self.make_controller()
+        controller.handle_chat_command("tattoo", "[U:1:6111605]", "CT", "map", "cache")
+
+        self.assertEqual(controller.state.current_map, "de_cache")
+        self.assertIn("changelevel de_cache", rcon_calls)
+
     def test_tactics_uses_normalized_current_map(self) -> None:
         controller, _, _ = self.make_controller()
         controller.state.current_map = "mirage"
@@ -341,6 +348,66 @@ class ControllerTests(unittest.TestCase):
         args, _ = assign_mock.call_args
         self.assertEqual(args[0], ["TATTOO"])
         self.assertEqual(args[1], ["TON"])
+
+    def test_smartshuffle_accepts_hash_prefixed_status_output(self) -> None:
+        fake_status = '# 1 "tattoo" [U:1:6111605] 00:12 15 0 active 196608\n# 2 "ton" [U:1:39882348] 00:10 22 0 active 196608\n'
+
+        def rcon_with_status(cmd: str) -> str:
+            return fake_status if cmd == "status" else ""
+
+        controller = Controller(rcon_with_status, lambda msg: None, MatchState())
+
+        with mock.patch.dict(
+            "controller.TARGETS",
+            {},
+            clear=True,
+        ), mock.patch(
+            "controller.smart_shuffle_balanced",
+            return_value=(["TATTOO"], ["TON"]),
+        ) as smart_mock, mock.patch("controller.assign_teams") as assign_mock, mock.patch(
+            "controller.ensure_players_initialized", return_value=[]
+        ):
+            controller.handle_chat_command("tattoo", "[U:1:6111605]", "CT", "smartshuffle", "")
+
+        smart_mock.assert_called_once_with(["TATTOO", "TON"])
+        assign_mock.assert_called_once()
+
+    def test_smartshuffle_falls_back_to_tracked_players_when_status_unparsed(self) -> None:
+        def rcon_with_unparsed_status(cmd: str) -> str:
+            return "hostname: test server\nplayers : 8 humans, 0 bots\n" if cmd == "status" else ""
+
+        controller = Controller(rcon_with_unparsed_status, lambda msg: None, MatchState())
+        players = [f"p{i}" for i in range(8)]
+        controller.state.player_teams = {
+            player: "CT" if index < 4 else "TERRORIST"
+            for index, player in enumerate(players)
+        }
+        controller.state.name_to_steam = {
+            player: f"[U:1:{1000 + index}]"
+            for index, player in enumerate(players)
+        }
+
+        with mock.patch(
+            "controller.smart_shuffle_balanced",
+            return_value=(players[:4], players[4:]),
+        ) as smart_mock, mock.patch("controller.assign_teams") as assign_mock, mock.patch(
+            "controller.ensure_players_initialized", return_value=[]
+        ) as ensure_mock:
+            controller.handle_chat_command("tattoo", "[U:1:6111605]", "CT", "smartshuffle", "")
+
+        smart_mock.assert_called_once_with(players)
+        ensure_mock.assert_called_once_with(players, 1000)
+        assign_mock.assert_called_once()
+
+    def test_lo3_limits_overtime_to_one_period(self) -> None:
+        controller, rcon_calls, _ = self.make_controller()
+
+        with mock.patch("controller.time.sleep"):
+            controller.handle_chat_command("tattoo", "[U:1:6111605]", "CT", "lo3", "")
+
+        self.assertIn("mp_overtime_enable 1", rcon_calls)
+        self.assertIn("mp_overtime_maxrounds 6", rcon_calls)
+        self.assertIn("mp_overtime_limit 1", rcon_calls)
 
     def test_side_switch_round_uses_runtime_max_rounds(self) -> None:
         settings = RuntimeConfig(max_rounds=30, available_maps=["dust2"])

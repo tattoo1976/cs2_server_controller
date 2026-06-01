@@ -97,7 +97,14 @@ CONNECT_RE = re.compile(
     r'"(?P<name>[^"<]+)<\d+><(?P<steam_id>\[U:1:\d+\])><[^>]*>" connected.*'
 )
 
-STATUS_RE = re.compile(r'^\s*\d+\s+"(?P<name>.+?)"\s+\[(?P<steam_id>U:1:\d+)\]')
+# `status` output differs a bit across CS2/server builds.
+# Support both:
+#   1 "name" [U:1:123] active
+#   # 1 "name" [U:1:123] 00:10 15 0 active
+STATUS_RE = re.compile(
+    r'^\s*#?\s*\d+\s+"(?P<name>.+?)"\s+\[(?P<steam_id>U:1:\d+)\]',
+    re.IGNORECASE,
+)
 
 MATCH_STATUS_RE = re.compile(r'MatchStatus: Score: \d+:\d+ on map ".*?" RoundsPlayed: (\d+)', re.IGNORECASE)
 
@@ -244,6 +251,8 @@ class Controller:
         if current_name_to_steam:
             self.state.name_to_steam = current_name_to_steam
             self.state.steam_to_name = current_steam_to_name
+        elif output.strip():
+            logger.warning("status output was present but no players were parsed")
         save_targets()
         logger.info("rcon status から TARGETS を更新しました")
         return set(current_name_to_steam.keys())
@@ -251,6 +260,20 @@ class Controller:
     def get_connected_players(self) -> List[str]:
         """Return currently connected non-bot players in normalized form."""
         return sorted(self._refresh_connected_player_names())
+
+    def _tracked_player_names(self) -> set[str]:
+        """Return non-bot players from the controller's current team/name cache."""
+        names: set[str] = set()
+        for source in (self.state.player_teams, self.state.temp_player_teams):
+            for key, team in source.items():
+                if team not in (TEAM_CT, TEAM_T):
+                    continue
+                name = self.state.steam_to_name.get(key, key)
+                if STEAM_ID_RE.match(name):
+                    continue
+                if not self._is_bot_player(name):
+                    names.add(name)
+        return names
 
     def _apply_team_shuffle(self, team_ct: List[str], team_t: List[str], label: str) -> None:
         """Announce teams, attempt RCON assignment, and restart."""
@@ -271,7 +294,13 @@ class Controller:
         if not output:
             return set()
         names = self.parse_status_output(output)
-        return {name.upper() for name in names if not is_bot(name)}
+        connected = {name.upper() for name in names if not is_bot(name)}
+        if connected:
+            return connected
+        tracked = self._tracked_player_names()
+        if tracked:
+            logger.warning("falling back to tracked players because status parsing returned no players: %s", sorted(tracked))
+        return tracked
 
     def _resolve_player_steam_id(self, player_name: str) -> Optional[str]:
         """Resolve a valid SteamID from runtime mappings/targets."""
@@ -1090,6 +1119,7 @@ class Controller:
             self.rcon("mp_match_can_clinch 1")
             self.rcon("mp_overtime_enable 1")
             self.rcon("mp_overtime_maxrounds 6")
+            self.rcon("mp_overtime_limit 1")
             self.rcon("mp_warmup_end")
             load_stats()
             load_elo()

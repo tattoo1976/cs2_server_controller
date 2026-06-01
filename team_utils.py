@@ -19,7 +19,8 @@ def balanced_shuffle(players, rating_fn):
     best_split: tuple = ([], [])
 
     n = len(players)
-    for i in range(n // 2, n // 2 + 2):
+    team_sizes = [n // 2] if n % 2 == 0 else [n // 2, n // 2 + 1]
+    for i in team_sizes:
         for team1 in itertools.combinations(players, i):
             team2 = [p for p in players if p not in team1]
             diff = abs(sum(rating_fn(p) for p in team1) - sum(rating_fn(p) for p in team2))
