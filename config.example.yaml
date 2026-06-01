@@ -11,6 +11,7 @@ available_maps:
   - inferno
   - ancient
   - mirage
+  - cache
 
 silence_seconds: 30
 idle_comment_seconds: 30

@@ -260,6 +260,43 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(controller.state.alive_ct, {"BRAD"})
         self.assertEqual(len(controller.state.alive_ct), 1)
 
+    def test_low_elo_kill_on_high_elo_player_announces_upset_once(self) -> None:
+        controller, _, messages = self.make_controller()
+        controller.state.live_started = True
+        controller.state.commentary_enabled = True
+        controller.state.round_number = 4
+        controller.state.alive_ct = {"low"}
+        controller.state.alive_t = {"high", "high2"}
+        controller.state.steam_to_name = {
+            "[U:1:111]": "low",
+            "[U:1:222]": "high",
+            "[U:1:333]": "high2",
+        }
+        controller.state.player_teams = {
+            "low": "CT",
+            "high": "TERRORIST",
+            "high2": "TERRORIST",
+        }
+
+        elo_values = {"low": 900, "high": 1200, "high2": 1250}
+
+        with mock.patch("controller.get_elo", side_effect=lambda player: elo_values[player]), mock.patch(
+            "controller.random.choice", side_effect=lambda seq: seq[0]
+        ):
+            line = '"low<2><[U:1:111]><CT>" killed "high<3><[U:1:222]><TERRORIST>" with "ak47"'
+            match = KILL_REGEX.search(line)
+            self.assertIsNotNone(match)
+            controller.handle_kill(line, match)  # type: ignore[arg-type]
+
+            controller.state.alive_t = {"high2"}
+            line = '"low<2><[U:1:111]><CT>" killed "high2<4><[U:1:333]><TERRORIST>" with "ak47"'
+            match = KILL_REGEX.search(line)
+            self.assertIsNotNone(match)
+            controller.handle_kill(line, match)  # type: ignore[arg-type]
+
+        upset_messages = [msg for msg in messages if "大金星" in msg]
+        self.assertEqual(upset_messages, ["low が格上の high を撃破。これは大金星。"])
+
     def test_score_flow_announces_streak(self) -> None:
         controller, _, messages = self.make_controller()
         controller.state.live_started = True
@@ -441,6 +478,20 @@ class ControllerTests(unittest.TestCase):
             controller.check_idle()
 
         self.assertEqual(len(messages), 1)
+
+    def test_idle_commentary_uses_one_v_one_message_in_one_v_one(self) -> None:
+        settings = RuntimeConfig(idle_comment_seconds=0, commentary_cooldown_seconds=0)
+        controller, _, messages = self.make_controller(settings=settings)
+        controller.state.commentary_enabled = True
+        controller.state.live_started = True
+        controller.state.last_kill_time = time.time() - 1
+        controller.state.alive_ct = {"ct1"}
+        controller.state.alive_t = {"t1"}
+
+        with mock.patch("controller.random.choice", side_effect=lambda seq: seq[0]):
+            controller.check_idle()
+
+        self.assertEqual(messages, ["1v1、最後の読み合い。"])
 
     def test_round_context_full_buy_commentary(self) -> None:
         settings = RuntimeConfig(

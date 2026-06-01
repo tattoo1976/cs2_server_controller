@@ -61,6 +61,12 @@ TEAM_KILL_MESSAGES = [
     "[TK] {player}、フレンドリーファイア発生。",
 ]
 
+ELO_UPSET_MESSAGES = [
+    "{killer} が格上の {victim} を撃破。これは大金星。",
+    "ELO差をひっくり返した。{killer}、ナイスピック。",
+    "{killer} が {victim} を落とした。番狂わせの一発。",
+]
+
 HELP_MESSAGES = [
     "使えるコマンド:",
     "!help - ヘルプを表示",

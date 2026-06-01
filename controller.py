@@ -19,6 +19,7 @@ from cheers import (
     CHEER_MESSAGES,
     CLUTCH_MESSAGES,
     ONE_VS_ONE_MESSAGES,
+    ELO_UPSET_MESSAGES,
     HEADSHOT_STREAK_MESSAGES,
     KILL_STREAK_MESSAGES,
     TEAM_KILL_MESSAGES,
@@ -133,6 +134,7 @@ WARMUP_GUIDE_MESSAGES = [
     "マップ変更は !map dust2 のように入力してください",
     "チーム分けは !shuffle で実行できます",
 ]
+ELO_UPSET_THRESHOLD = 200
 
 
 class Controller:
@@ -831,6 +833,50 @@ class Controller:
 
         return []
 
+    def _idle_comment_message(self, target: str) -> str:
+        """Choose an idle cheer that does not contradict the current alive count."""
+        ct_alive = len(self.state.alive_ct)
+        t_alive = len(self.state.alive_t)
+
+        if ct_alive == 1 and t_alive == 1:
+            return random.choice(ONE_VS_ONE_MESSAGES)
+
+        candidates = list(CHEER_MESSAGES)
+        if ct_alive <= 1 and t_alive <= 1:
+            candidates = [msg for msg in candidates if "人数有利" not in msg]
+
+        return random.choice(candidates).format(player=target)
+
+    def _maybe_announce_elo_upset(
+        self,
+        killer: str,
+        victim: str,
+        killer_is_bot: bool,
+        victim_is_bot: bool,
+        is_teamkill: bool,
+    ) -> None:
+        if not self.should_commentate():
+            return
+        if killer_is_bot or victim_is_bot or is_teamkill:
+            return
+
+        killer_elo = get_elo(killer)
+        victim_elo = get_elo(victim)
+        if victim_elo - killer_elo < ELO_UPSET_THRESHOLD:
+            return
+
+        message = random.choice(ELO_UPSET_MESSAGES).format(
+            killer=killer,
+            victim=victim,
+            diff=victim_elo - killer_elo,
+        )
+        self._emit_commentary(
+            message,
+            f"elo_upset_{self.state.round_number}",
+            cooldown_seconds=self.settings.score_flow_cooldown_seconds,
+            once_per_round=True,
+        )
+
     def check_silence(self):
         if not self.should_commentate():
             return
@@ -934,6 +980,14 @@ class Controller:
             elif kt == TEAM_T and not killer_is_bot:
                 self._add_alive_player(TEAM_T, killer, killer_steam_id)
                 self.state.round_weapons_t.add(weapon.lower())
+
+            self._maybe_announce_elo_upset(
+                killer=killer,
+                victim=victim,
+                killer_is_bot=killer_is_bot,
+                victim_is_bot=victim_is_bot,
+                is_teamkill=is_teamkill,
+            )
 
             self.state.kill_streaks[killer] = self.state.kill_streaks.get(killer, 0) + 1
             streak = self.state.kill_streaks[killer]
@@ -1755,7 +1809,7 @@ class Controller:
             alive_players = list(self.state.alive_ct | self.state.alive_t)
             if alive_players:
                 target = random.choice(alive_players)
-                message = random.choice(CHEER_MESSAGES).format(player=target)
+                message = self._idle_comment_message(target)
                 if self._emit_commentary(
                     message,
                     "idle_cheer",

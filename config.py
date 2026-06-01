@@ -20,7 +20,7 @@ MAX_ROUNDS = 24
 TAUNT_CHANCE = 0.25
 
 # Public map pool default.
-AVAILABLE_MAPS = ["dust2", "inferno", "ancient", "mirage"]
+AVAILABLE_MAPS = ["dust2", "inferno", "ancient", "mirage", "cache"]
 
 # Legacy options (kept for compatibility).
 LOG_MONITOR_LATEST = 3
