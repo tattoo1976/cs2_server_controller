@@ -14,6 +14,9 @@ class RuntimeConfig:
     available_maps: List[str] = None  # type: ignore[assignment]
     log_dir: str = LOG_DIR
     max_rounds: int = MAX_ROUNDS
+    wingman_max_rounds: int = 16
+    wingman_maps: List[str] = None  # type: ignore[assignment]
+    workshop_maps: Dict[str, str] = None  # type: ignore[assignment]
     taunt_chance: float = TAUNT_CHANCE
     silence_seconds: int = 30
     idle_comment_seconds: int = 30
@@ -25,6 +28,10 @@ class RuntimeConfig:
     def __post_init__(self) -> None:
         if self.available_maps is None:
             object.__setattr__(self, "available_maps", list(AVAILABLE_MAPS))
+        if self.wingman_maps is None:
+            object.__setattr__(self, "wingman_maps", ["de_inferno", "de_nuke"])
+        if self.workshop_maps is None:
+            object.__setattr__(self, "workshop_maps", {})
 
 
 def _parse_scalar(raw: str) -> Any:
@@ -77,6 +84,23 @@ def _parse_simple_yaml(text: str) -> Dict[str, Any]:
     return data
 
 
+def _parse_workshop_maps(raw: Any) -> Dict[str, str]:
+    """Parse `workshop_maps` entries of the form "name=workshop_id" into a dict."""
+    result: Dict[str, str] = {}
+    if not isinstance(raw, list):
+        return result
+    for item in raw:
+        text = str(item)
+        if "=" not in text:
+            continue
+        name, workshop_id = text.split("=", 1)
+        name = name.strip().lower()
+        workshop_id = workshop_id.strip()
+        if name and workshop_id:
+            result[name] = workshop_id
+    return result
+
+
 def load_runtime_config(path: str = "config.yaml") -> RuntimeConfig:
     """Load runtime settings.
 
@@ -97,6 +121,9 @@ def load_runtime_config(path: str = "config.yaml") -> RuntimeConfig:
         available_maps=list(parsed.get("available_maps", list(AVAILABLE_MAPS))),
         log_dir=str(parsed.get("log_dir", LOG_DIR)),
         max_rounds=int(parsed.get("max_rounds", MAX_ROUNDS)),
+        wingman_max_rounds=int(parsed.get("wingman_max_rounds", 16)),
+        wingman_maps=list(parsed.get("wingman_maps", ["de_inferno", "de_nuke"])),
+        workshop_maps=_parse_workshop_maps(parsed.get("workshop_maps", [])),
         taunt_chance=float(parsed.get("taunt_chance", TAUNT_CHANCE)),
         silence_seconds=int(parsed.get("silence_seconds", 30)),
         idle_comment_seconds=int(parsed.get("idle_comment_seconds", 30)),

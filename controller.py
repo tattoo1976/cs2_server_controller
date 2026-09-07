@@ -16,22 +16,29 @@ from typing import Any, Callable, Dict, List, Optional, TextIO
 
 from cheers import (
     ACE_MESSAGES,
+    ACE_INSIGHT_MESSAGES,
     CHEER_MESSAGES,
+    REACTION_MESSAGES,
     CLUTCH_MESSAGES,
+    CLUTCH_INSIGHT_MESSAGES,
     ONE_VS_ONE_MESSAGES,
-    ELO_UPSET_MESSAGES,
+    ONE_VS_ONE_INSIGHT_MESSAGES,
     HEADSHOT_STREAK_MESSAGES,
     KILL_STREAK_MESSAGES,
     TEAM_KILL_MESSAGES,
+    TEAM_KILL_INSIGHT_MESSAGES,
     HELP_MESSAGES,
     HELP_MESSAGES_ADMIN,
     OMIKUJI_RESULTS,
     LUCKY_WEAPONS,
     get_accolade_message,
 )
+from announcers import ANNOUNCER_DUOS
 from messages import (
     ROUND_EVENTS,
+    ROUND_EVENT_INSIGHT_MESSAGES,
     SILENCE_MESSAGES,
+    SILENCE_INSIGHT_MESSAGES,
     SCORE_FLOW_MESSAGES,
     ROUND_CONTEXT_MESSAGES,
     OPENING_PLAYER_DUEL_MESSAGES,
@@ -53,16 +60,17 @@ from player_stats import (
 )
 from state import MatchState
 from runtime_config import RuntimeConfig, load_runtime_config
-from taunts import TAUNT_MESSAGES
-from tactics import get_tactic, normalize_map_name
+from taunts import TAUNT_MESSAGES, TAUNT_MESSAGES_BY_PERSONA
+from tactics import get_tactic, normalize_map_name, get_map_display_name
 from team_utils import (
     assign_teams,
     predict_winrate,
     smart_shuffle_balanced,
     kd_shuffle_balanced,
+    wingman_shuffle_balanced,
 )
 
-PLAYER_TEAM_RE = re.compile(r'"(?P<name>[^<]+)<\d+><(?P<steam_id>[^>]+)><(?P<team>CT|TERRORIST)>"')
+PLAYER_TEAM_RE = re.compile(r'"(?P<name>[^"<]+)<\d+><(?P<steam_id>[^>]+)><(?P<team>CT|TERRORIST)>"')
 MATCH_STATUS_RE = re.compile(r'MatchStatus: Score: \d+:\d+ on map ".*?" RoundsPlayed: (\d+)', re.IGNORECASE)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 # Configure module logger.
@@ -98,12 +106,14 @@ CONNECT_RE = re.compile(
     r'"(?P<name>[^"<]+)<\d+><(?P<steam_id>\[U:1:\d+\])><[^>]*>" connected.*'
 )
 
-# `status` output differs a bit across CS2/server builds.
-# Support both:
-#   1 "name" [U:1:123] active
-#   # 1 "name" [U:1:123] 00:10 15 0 active
+# `status` output differs a bit across CS2/server builds (column widths, extra
+# leading fields, etc.). Rather than anchoring to the exact leading columns
+# (which broke entirely on at least one server build in the wild), just look
+# for a quoted name immediately followed by a steamid bracket anywhere on the
+# line. This is specific enough to avoid false positives elsewhere in the
+# `status` output while being resilient to column-layout differences.
 STATUS_RE = re.compile(
-    r'^\s*#?\s*\d+\s+"(?P<name>.+?)"\s+\[(?P<steam_id>U:1:\d+)\]',
+    r'"(?P<name>[^"]+)"\s*\[(?P<steam_id>U:1:\d+)\]',
     re.IGNORECASE,
 )
 
@@ -111,13 +121,25 @@ MATCH_STATUS_RE = re.compile(r'MatchStatus: Score: \d+:\d+ on map ".*?" RoundsPl
 
 MAP_CHANGE_RE = re.compile(r'Loading map "([^\"]+)"')
 ROUND_START_RE = re.compile(r'Round_Start|Starting Freeze period', re.IGNORECASE)
+# Reliable signal that we're back in pre-match warmup. If a previous match
+# never reached a proper Game Over (e.g. cut short for testing, or via
+# mp_restartgame instead of a real match), live_started can otherwise stay
+# stuck True, letting commentary fire again before the next !lo3.
+WARMUP_START_RE = re.compile(r'World triggered "Warmup_Start"', re.IGNORECASE)
 CHAT_CMD_RE = re.compile(
     r'L \d+/\d+/\d+ - \d+:\d+:\d+: "([^<]+)<\d+><(\[U:1:\d+\])><(CT|TERRORIST)>" say "!?(\w+)(?:\s+(.*))?"'
 )
 GAME_OVER_RE = re.compile(r'Game Over: .*?score\s+(\d+):(\d+)', re.IGNORECASE)
 
 TEAM_ASSIGN_RE = re.compile(
-    r'"(?P<name>.+?)<\d+><(?P<steam_id>[^>]+)><[^>]*>" joined team "(?P<team>CT|TERRORIST)"'
+    r'"(?P<name>[^"<]+)<\d+><(?P<steam_id>[^>]+)><[^>]*>" joined team "(?P<team>CT|TERRORIST)"'
+)
+# Common join-time line: `"name<uid><steamid>" switched from team <Unassigned> to <TEAM>`.
+# Without this, a player's team is only learned from an incidental later line
+# (a purchase, a kill) via PLAYER_TEAM_RE, so a round-start alive-count rebuilt
+# from `player_teams` can undercount real players and trigger a false 1v1/clutch call.
+SWITCH_TEAM_RE = re.compile(
+    r'"(?P<name>[^"<]+)<\d+><(?P<steam_id>[^>]*)>" switched from team <[^>]*> to <(?P<team>CT|TERRORIST)>'
 )
 STEAM_ID_RE = re.compile(r"^\[U:1:\d+\]$")
 
@@ -129,12 +151,11 @@ TEAM_T = "TERRORIST"
 TEAM_CT = "CT"
 WARMUP_GUIDE_INTERVAL_SECONDS = 60
 WARMUP_GUIDE_MESSAGES = [
-    "使えるコマンドは !help で確認できます",
+    "使えるコマンドは !svr_help で確認できます",
     "試合開始は両チーム !rdy のあと !lo3 です",
     "マップ変更は !map dust2 のように入力してください",
     "チーム分けは !shuffle で実行できます",
 ]
-ELO_UPSET_THRESHOLD = 200
 
 
 class Controller:
@@ -158,7 +179,7 @@ class Controller:
         self.say = self._say_throttled
         self.state = state or MatchState()
         self.settings = settings or load_runtime_config()
-        self.state.WIN_ROUNDS = self.settings.max_rounds // 2 + 1
+        self.state.WIN_ROUNDS = self._effective_max_rounds() // 2 + 1
         self.json_buffer: List[str] = []
         self.in_json_block: bool = False
         self.event_handlers: List[tuple[re.Pattern[str], Callable[[re.Match[str], str], None]]] = []
@@ -173,6 +194,68 @@ class Controller:
         self._say_raw(msg)
         self._last_say_at = time.time()
 
+    def _say_duo(self, commentary_msg: str, insight_msg: str) -> None:
+        """Announce a big moment as a 実況 -> 解説 -> 実況 three-line exchange."""
+        self.say(f"実況: {commentary_msg}")
+        self.say(f"解説: {insight_msg}")
+        reaction = self._pick_reaction()
+        if reaction:
+            self.say(f"実況: {reaction}")
+
+    def _pick_reaction(self) -> Optional[str]:
+        """Short 実況 reaction line following the 解説's remark, in this match's persona voice."""
+        duo = self._current_duo()
+        pool = duo.get("reactions") if duo else None
+        if pool:
+            return random.choice(pool)
+        return random.choice(REACTION_MESSAGES) if REACTION_MESSAGES else None
+
+    def _effective_max_rounds(self) -> int:
+        """Regulation round count for the current match (Wingman uses its own count)."""
+        if self.state.wingman_mode:
+            return self.settings.wingman_max_rounds
+        return self.settings.max_rounds
+
+    def _say_commentary(self, msg: str) -> None:
+        """Broadcast-flavor commentary line, prefixed like the play-by-play voice.
+
+        Not for direct command responses (!svr_help, !stats, etc.) — only for
+        unprompted match-flow narration.
+        """
+        self.say(f"実況: {msg}")
+
+    def _current_duo(self) -> Optional[dict]:
+        idx = self.state.announcer_duo_index
+        if idx is None:
+            return None
+        return ANNOUNCER_DUOS[idx]
+
+    def _duo_pool(self, category: str, subkey=None):
+        """Look up this match's persona pool for `category`/`subkey`, or None if unset/missing."""
+        duo = self._current_duo()
+        if not duo:
+            return None
+        node = duo.get(category)
+        if subkey is not None and isinstance(node, dict):
+            node = node.get(subkey)
+        return node or None
+
+    def _pick(self, generic_list, category: str, subkey=None) -> str:
+        """Pick a line from this match's persona pool, falling back to the generic pool."""
+        pool = self._duo_pool(category, subkey)
+        return random.choice(pool) if pool else random.choice(generic_list)
+
+    def _pick_pair(self, generic_commentary, generic_insight, category: str, subkey=None):
+        """Like `_pick` but for a commentary+insight duo line."""
+        pool = self._duo_pool(category, subkey)
+        if pool:
+            commentary = random.choice(pool["commentary"])
+            insight = random.choice(pool["insight"])
+        else:
+            commentary = random.choice(generic_commentary)
+            insight = random.choice(generic_insight)
+        return commentary, insight
+
     def setup_event_listeners(self) -> None:
         """Initialize the log event dispatcher table."""
         self.event_handlers = [
@@ -184,8 +267,10 @@ class Controller:
             (MATCH_STATUS_RE, self._handle_match_status_event),
             (GAME_OVER_RE, self._handle_game_over_event),
             (MAP_CHANGE_RE, self._handle_map_change_event),
+            (WARMUP_START_RE, self._handle_warmup_start_event),
             (CHAT_CMD_RE, self._handle_chat_command_event),
             (PLAYER_TEAM_RE, self._handle_player_team_event),
+            (SWITCH_TEAM_RE, self._handle_player_team_event),
             (TEAM_ASSIGN_RE, self._handle_team_assign_event),
             (DISCONNECT_RE, self._handle_disconnect_event),
         ]
@@ -243,7 +328,7 @@ class Controller:
         current_name_to_steam: Dict[str, str] = {}
         current_steam_to_name: Dict[str, str] = {}
         for line in output.splitlines():
-            match = STATUS_RE.match(line)
+            match = STATUS_RE.search(line)
             if match:
                 name = match.group("name")
                 steam_id = f"[{match.group('steam_id')}]"
@@ -254,7 +339,10 @@ class Controller:
             self.state.name_to_steam = current_name_to_steam
             self.state.steam_to_name = current_steam_to_name
         elif output.strip():
-            logger.warning("status output was present but no players were parsed")
+            logger.warning(
+                "status output was present but no players were parsed; raw sample: %r",
+                output[:500],
+            )
         save_targets()
         logger.info("rcon status から TARGETS を更新しました")
         return set(current_name_to_steam.keys())
@@ -277,6 +365,25 @@ class Controller:
                     names.add(name)
         return names
 
+    def _reset_special_game_mode_cvars(self) -> None:
+        """Unconditionally clear any Wingman/Deathmatch/Retakes leftovers.
+
+        Cvars like sv_skirmish_id and the weapon-buy restrictions persist
+        across changelevel and aren't touched by the mode we're about to
+        enter, so relying on "did we think we were in mode X" flags is
+        fragile (they can desync from reality, e.g. going straight from
+        !retake to !dm). Just always reset everything -- the extra rcon
+        calls are harmless when there was nothing to clean up.
+        """
+        self.state.wingman_mode = False
+        self.state.dm_mode = False
+        self.state.retake_mode = False
+        self.rcon("sv_skirmish_id 0")
+        self.rcon("game_mode 1")
+        self.rcon("bot_kick")
+        self.rcon("mp_weapons_allow_smgs -1")
+        self.rcon("mp_weapons_allow_heavy -1")
+
     def _apply_team_shuffle(self, team_ct: List[str], team_t: List[str], label: str) -> None:
         """Announce teams, attempt RCON assignment, and restart."""
         self.say(f"CT ({label}): " + ", ".join(team_ct))
@@ -290,13 +397,79 @@ class Controller:
         self.say("チーム移動: CT -> jointeam 2 / T -> jointeam 3 をコンソールで入力")
         self.rcon("mp_restartgame 3")
 
+    def _start_wingman_match(self, players: List[str]) -> None:
+        """Finish Wingman setup (bots/weapon cvars/shuffle) after the map reload."""
+        connected = self.get_connected_players()
+        if connected:
+            players = connected
+        if not (1 <= len(players) <= 4):
+            self.say(f"Wingman再読み込み後に人数が変わりました（現在{len(players)}人）。もう一度 !wingman してください")
+            return
+
+        added = ensure_players_initialized(players, 1000)
+        if added:
+            logger.info("ELO初期値を追加: %s", ", ".join(added))
+
+        self.state.wingman_mode = True
+        self.state.WIN_ROUNDS = self._effective_max_rounds() // 2 + 1
+        self.rcon(f"mp_maxrounds {self.settings.wingman_max_rounds}")
+
+        team_a, team_b = wingman_shuffle_balanced(players)
+        bots_needed_ct = team_a.count("BOT")
+        bots_needed_t = team_b.count("BOT")
+        if bots_needed_ct or bots_needed_t:
+            # bot_quota is a *target* the engine actively maintains on its own
+            # (it was already auto-filling empty slots with bots before we
+            # ever sent a command). Kick whatever it already added, then pin
+            # the quota to our target and let the engine's own fill logic do
+            # the adding -- calling bot_add_ct/t on top of that as well is
+            # what caused a doubled bot count in an earlier attempt.
+            self.rcon("bot_kick")
+            self.rcon("mp_autoteambalance 0")
+            self.rcon("mp_limitteams 0")
+            self.rcon("bot_quota_mode normal")
+            self.rcon(f"bot_quota {bots_needed_ct + bots_needed_t}")
+            self.rcon("bot_difficulty 3")
+            # Keep bot loadouts sane: pistols, rifles, and snipers (AWP/Scout;
+            # CS2 has no separate cvar to exclude the auto-snipers) only.
+            self.rcon("mp_weapons_allow_pistols -1")
+            self.rcon("mp_weapons_allow_rifles -1")
+            self.rcon("mp_weapons_allow_snipers -1")
+            self.rcon("mp_weapons_allow_smgs 0")
+            self.rcon("mp_weapons_allow_heavy 0")
+
+        self._apply_team_shuffle(team_a, team_b, label="Wingman")
+        bot_note = ""
+        total_bots = bots_needed_ct + bots_needed_t
+        if total_bots:
+            bot_note = f"（BOTを{total_bots}体追加）"
+        self.say(
+            f"Wingmanモード（MR{self.settings.wingman_max_rounds // 2}）に切り替えました{bot_note}。"
+            "準備ができたら !rdy → !lo3 で開始してください"
+        )
+
+    def _recently_connected_names(self) -> set[str]:
+        """Return non-bot names seen via connect/disconnect log events (real-time, may lead `status` by a beat)."""
+        names: set[str] = set()
+        for name in self.state.name_to_steam:
+            if STEAM_ID_RE.match(name):
+                continue
+            if not self._is_bot_player(name):
+                names.add(name.upper())
+        return names
+
     def _refresh_connected_player_names(self) -> set[str]:
         """Refresh status and return currently connected non-bot names (upper-cased)."""
         output = self.rcon("status")
         if not output:
-            return set()
+            return self._recently_connected_names()
         names = self.parse_status_output(output)
         connected = {name.upper() for name in names if not is_bot(name)}
+        # `status` is a point-in-time snapshot and can momentarily miss a player who
+        # just connected (log-tailed connect events update name_to_steam immediately,
+        # before the next `status` poll picks them up). Union them in so a shuffle
+        # run right after someone joins post-warmup doesn't drop them.
+        connected |= self._recently_connected_names()
         if connected:
             return connected
         tracked = self._tracked_player_names()
@@ -388,11 +561,12 @@ class Controller:
 
             # Optional flavor message.
             if (
-                name.lower() == "tkmi"
+                self.should_commentate()
+                and name.lower() == "tkmi"
                 and self.state.rounds_played in (11, 23)
                 and not self.state.round_awp_taunt_sent
             ):
-                self.say("tkmiさん、そろそろ AWP 見たいですね")
+                self._say_commentary("tkmiさん、そろそろ AWP 見たいですね")
                 self.state.round_awp_taunt_sent = True
 
             if int(player_data.get("3k", 0)) > 0:
@@ -438,6 +612,7 @@ class Controller:
         *,
         cooldown_seconds: Optional[int] = None,
         once_per_round: bool = False,
+        insight_message: Optional[str] = None,
     ) -> bool:
         """Emit commentary with cooldown/once-per-round guards."""
         if not self.should_commentate():
@@ -455,7 +630,10 @@ class Controller:
         if cooldown > 0 and now - last_at < cooldown:
             return False
 
-        self.say(message)
+        if insight_message:
+            self._say_duo(message, insight_message)
+        else:
+            self._say_commentary(message)
         self.state.last_comment_at[key] = now
         if once_per_round:
             self.state.round_comment_keys.add(key)
@@ -498,7 +676,7 @@ class Controller:
         t_buy = self._buy_tier(self.state.round_weapons_t)
 
         if self.state.round_number in (1, 13):
-            msg = random.choice(ROUND_CONTEXT_MESSAGES["pistol_round"]).format(
+            msg = self._pick(ROUND_CONTEXT_MESSAGES["pistol_round"], "round_context", "pistol_round").format(
                 ct=self.state.ct_score,
                 t=self.state.t_score,
             )
@@ -506,17 +684,17 @@ class Controller:
             return
 
         if ct_buy == "full" and t_buy in {"eco", "pistol"}:
-            msg = random.choice(ROUND_CONTEXT_MESSAGES["anti_eco_ct"]).format(ct=self.state.ct_score, t=self.state.t_score)
+            msg = self._pick(ROUND_CONTEXT_MESSAGES["anti_eco_ct"], "round_context", "anti_eco_ct").format(ct=self.state.ct_score, t=self.state.t_score)
             self._emit_commentary(msg, f"anti_eco_ct_{self.state.round_number}", once_per_round=True)
         elif t_buy == "full" and ct_buy in {"eco", "pistol"}:
-            msg = random.choice(ROUND_CONTEXT_MESSAGES["anti_eco_t"]).format(ct=self.state.ct_score, t=self.state.t_score)
+            msg = self._pick(ROUND_CONTEXT_MESSAGES["anti_eco_t"], "round_context", "anti_eco_t").format(ct=self.state.ct_score, t=self.state.t_score)
             self._emit_commentary(msg, f"anti_eco_t_{self.state.round_number}", once_per_round=True)
         elif ct_buy == "full" and t_buy == "full":
-            msg = random.choice(ROUND_CONTEXT_MESSAGES["full_buy"]).format(ct=self.state.ct_score, t=self.state.t_score)
+            msg = self._pick(ROUND_CONTEXT_MESSAGES["full_buy"], "round_context", "full_buy").format(ct=self.state.ct_score, t=self.state.t_score)
             self._emit_commentary(msg, f"full_buy_{self.state.round_number}", once_per_round=True)
 
-        if self.state.round_number > self.settings.max_rounds and abs(self.state.ct_score - self.state.t_score) <= 1:
-            msg = random.choice(ROUND_CONTEXT_MESSAGES["ot_point"]).format(
+        if self.state.round_number > self._effective_max_rounds() and abs(self.state.ct_score - self.state.t_score) <= 1:
+            msg = self._pick(ROUND_CONTEXT_MESSAGES["ot_point"], "round_context", "ot_point").format(
                 ct=self.state.ct_score,
                 t=self.state.t_score,
             )
@@ -640,7 +818,11 @@ class Controller:
             return
 
         self.debug_print(f"[INFO] round: {self.state.round_number} -> side switch")
-        self.say(random.choice(ROUND_EVENTS.get("side_switch", [])))
+        self._say_duo(*self._pick_pair(
+            ROUND_EVENTS.get("side_switch", []),
+            ROUND_EVENT_INSIGHT_MESSAGES["side_switch"],
+            "round_events", "side_switch",
+        ))
         self.state.side_switch_announced = True
         self.state.last_side_switch_round = self.state.round_number
         self._swap_player_teams()
@@ -651,11 +833,11 @@ class Controller:
         self.state.t_match_point_announced = False
 
     def _is_side_switch_round(self, round_number: int) -> bool:
-        regulation_switch = self.settings.max_rounds // 2 + 1
+        regulation_switch = self._effective_max_rounds() // 2 + 1
         if round_number == regulation_switch:
             return True
         # Overtime MR3 halves: first switch after 3 OT rounds, then every 6 rounds.
-        ot_first_round = self.settings.max_rounds + 1
+        ot_first_round = self._effective_max_rounds() + 1
         ot_first_switch = ot_first_round + 3
         if round_number >= ot_first_switch and (round_number - ot_first_round) % 6 == 3:
             return True
@@ -677,13 +859,13 @@ class Controller:
             winner = "UNKNOWN"
 
         if winner == "CT":
-            self.say(f"CTチームの勝利！ {ct_score}-{t_score}")
+            self._say_commentary(f"CTチームの勝利！ {ct_score}-{t_score}")
         elif winner == "TERRORIST":
-            self.say(f"Tチームの勝利！ {t_score}-{ct_score}")
+            self._say_commentary(f"Tチームの勝利！ {t_score}-{ct_score}")
         elif winner == "DRAW":
-            self.say("引き分けです")
+            self._say_commentary("引き分けです")
         else:
-            self.say("試合終了")
+            self._say_commentary("試合終了")
 
     def _announce_opening_player_duel(self) -> None:
         """Announce one highlighted player from each team at match start."""
@@ -695,7 +877,7 @@ class Controller:
         ct_player = random.choice(ct_candidates)
         t_player = random.choice(t_candidates)
         template = random.choice(OPENING_PLAYER_DUEL_MESSAGES)
-        self.say(template.format(ct_player=ct_player, t_player=t_player))
+        self._say_commentary(template.format(ct_player=ct_player, t_player=t_player))
 
     def handle_round_start(self, line: str) -> None:
         """Documentation."""
@@ -750,13 +932,25 @@ class Controller:
         self.state.last_kill_time = time.time()
         self.state.round_awp_taunt_sent = False
 
-        if self.state.round_number == self.settings.max_rounds + 1:
-            self.say(random.choice(ROUND_EVENTS.get("overtime_start", [])))
-        elif self.state.round_number == self.settings.max_rounds + 4:
-            self.say(random.choice(ROUND_EVENTS.get("overtime_late", [])))
+        if self.state.round_number == self._effective_max_rounds() + 1:
+            self._say_duo(*self._pick_pair(
+                ROUND_EVENTS.get("overtime_start", []),
+                ROUND_EVENT_INSIGHT_MESSAGES["overtime_start"],
+                "round_events", "overtime_start",
+            ))
+        elif self.state.round_number == self._effective_max_rounds() + 4:
+            self._say_duo(*self._pick_pair(
+                ROUND_EVENTS.get("overtime_late", []),
+                ROUND_EVENT_INSIGHT_MESSAGES["overtime_late"],
+                "round_events", "overtime_late",
+            ))
 
         if self.state.round_number == 1 and self.state.live_started and not self.state.first_round_announced:
-            self.say(random.choice(ROUND_EVENTS.get("first_round", [])))
+            if self.state.announcer_duo_index is None:
+                self.state.announcer_duo_index = random.randrange(len(ANNOUNCER_DUOS))
+            map_name = get_map_display_name(self.state.current_map)
+            intro_commentary, intro_insight = ANNOUNCER_DUOS[self.state.announcer_duo_index]["intro"]
+            self._say_duo(intro_commentary.format(map_name=map_name), intro_insight.format(map_name=map_name))
             self._announce_opening_player_duel()
             self.state.first_round_announced = True
 
@@ -769,7 +963,7 @@ class Controller:
 
         candidates = TAUNT_MESSAGES.get(killer.upper()) or TAUNT_MESSAGES.get("__DEFAULT__", [])
         if candidates and random.random() < self.settings.taunt_chance:
-            self.say(random.choice(candidates))
+            self._say_commentary(random.choice(candidates))
 
     def _announce_clutch_state(self, ct_alive: int, t_alive: int) -> None:
         """Announce clutch/1v1 state transitions once per round."""
@@ -777,7 +971,15 @@ class Controller:
             if not self.state.one_v_one_announced:
                 self.state.clutch_active = True
                 self.state.one_v_one_announced = True
-                self.say(random.choice(ONE_VS_ONE_MESSAGES))
+                player1 = next(iter(self.state.alive_ct), "")
+                player2 = next(iter(self.state.alive_t), "")
+                commentary, insight = self._pick_pair(
+                    ONE_VS_ONE_MESSAGES, ONE_VS_ONE_INSIGHT_MESSAGES, "one_v_one",
+                )
+                self._say_duo(
+                    commentary.format(player1=player1, player2=player2),
+                    insight.format(player1=player1, player2=player2),
+                )
                 self.debug_print("[CLUTCH] 1v1 situation entered")
             return
 
@@ -791,7 +993,11 @@ class Controller:
             self.state.clutch_active = True
             self.state.clutch_player = candidates[0]
             self.state.clutch_enemy_count = t_alive
-            self.say(random.choice(CLUTCH_MESSAGES).format(player=self.state.clutch_player, count=t_alive))
+            commentary, insight = self._pick_pair(CLUTCH_MESSAGES, CLUTCH_INSIGHT_MESSAGES, "clutch")
+            self._say_duo(
+                commentary.format(player=self.state.clutch_player, count=t_alive),
+                insight.format(player=self.state.clutch_player, count=t_alive),
+            )
             self.debug_print(f"[CLUTCH] {self.state.clutch_player} (CT) vs {t_alive} T")
             return
 
@@ -802,7 +1008,11 @@ class Controller:
             self.state.clutch_active = True
             self.state.clutch_player = candidates[0]
             self.state.clutch_enemy_count = ct_alive
-            self.say(random.choice(CLUTCH_MESSAGES).format(player=self.state.clutch_player, count=ct_alive))
+            commentary, insight = self._pick_pair(CLUTCH_MESSAGES, CLUTCH_INSIGHT_MESSAGES, "clutch")
+            self._say_duo(
+                commentary.format(player=self.state.clutch_player, count=ct_alive),
+                insight.format(player=self.state.clutch_player, count=ct_alive),
+            )
             self.debug_print(f"[CLUTCH] {self.state.clutch_player} (T) vs {ct_alive} CT")
             return
 
@@ -810,12 +1020,12 @@ class Controller:
         """Documentation."""
         return self.state.commentary_enabled and self.state.live_started
 
-    def _get_personal_taunts(self, player_name: str) -> List[str]:
-        """Resolve personal taunts with tolerant name matching."""
+    def _lookup_taunt_pool(self, pool: dict, player_name: str) -> List[str]:
+        """Resolve a name -> taunts pool entry with tolerant name matching."""
         raw = player_name.strip()
         upper = raw.upper()
 
-        direct = TAUNT_MESSAGES.get(upper)
+        direct = pool.get(upper)
         if direct:
             return direct
 
@@ -824,7 +1034,7 @@ class Controller:
         if not norm:
             return []
 
-        for key, msgs in TAUNT_MESSAGES.items():
+        for key, msgs in pool.items():
             if key == "__DEFAULT__":
                 continue
             key_norm = re.sub(r"[^A-Z0-9]+", "", key.upper())
@@ -832,6 +1042,19 @@ class Controller:
                 return msgs
 
         return []
+
+    def _get_personal_taunts(self, player_name: str) -> List[str]:
+        """Resolve personal 3-kill taunts, preferring this match's announcer persona voice."""
+        idx = self.state.announcer_duo_index
+        if idx is not None:
+            persona_taunts = self._lookup_taunt_pool(TAUNT_MESSAGES_BY_PERSONA[idx], player_name)
+            if persona_taunts:
+                return persona_taunts
+            default = TAUNT_MESSAGES_BY_PERSONA[idx].get("__DEFAULT__")
+            if default:
+                return default
+
+        return self._lookup_taunt_pool(TAUNT_MESSAGES, player_name)
 
     def _idle_comment_message(self, target: str) -> str:
         """Choose an idle cheer that does not contradict the current alive count."""
@@ -846,36 +1069,6 @@ class Controller:
             candidates = [msg for msg in candidates if "人数有利" not in msg]
 
         return random.choice(candidates).format(player=target)
-
-    def _maybe_announce_elo_upset(
-        self,
-        killer: str,
-        victim: str,
-        killer_is_bot: bool,
-        victim_is_bot: bool,
-        is_teamkill: bool,
-    ) -> None:
-        if not self.should_commentate():
-            return
-        if killer_is_bot or victim_is_bot or is_teamkill:
-            return
-
-        killer_elo = get_elo(killer)
-        victim_elo = get_elo(victim)
-        if victim_elo - killer_elo < ELO_UPSET_THRESHOLD:
-            return
-
-        message = random.choice(ELO_UPSET_MESSAGES).format(
-            killer=killer,
-            victim=victim,
-            diff=victim_elo - killer_elo,
-        )
-        self._emit_commentary(
-            message,
-            f"elo_upset_{self.state.round_number}",
-            cooldown_seconds=self.settings.score_flow_cooldown_seconds,
-            once_per_round=True,
-        )
 
     def check_silence(self):
         if not self.should_commentate():
@@ -895,19 +1088,24 @@ class Controller:
                 return
 
             if ct == t:
-                message = random.choice(SILENCE_MESSAGES["even"])
+                category = "even"
             elif ct > t:
-                message = random.choice(SILENCE_MESSAGES["ct_advantage"])
+                category = "ct_advantage"
             elif t > ct:
-                message = random.choice(SILENCE_MESSAGES["t_advantage"])
+                category = "t_advantage"
             else:
-                message = random.choice(SILENCE_MESSAGES["balanced"])
+                category = "balanced"
+
+            message, insight_message = self._pick_pair(
+                SILENCE_MESSAGES[category], SILENCE_INSIGHT_MESSAGES[category], "silence", category,
+            )
 
             if self._emit_commentary(
                 message,
                 "silence",
                 cooldown_seconds=self.settings.commentary_cooldown_seconds,
                 once_per_round=True,
+                insight_message=insight_message,
             ):
                 self.state.silence_comment_given = True
 
@@ -940,7 +1138,7 @@ class Controller:
         victim_is_bot = self._is_bot_player(victim, victim_steam_id)
         is_teamkill = (killer_team == victim_team)
 
-        if self.state.live_started:
+        if self.state.live_started and not self.state.practice_mode:
             if not victim_is_bot:
                 increment_deaths(victim)
             if not killer_is_bot and not is_teamkill:
@@ -959,19 +1157,19 @@ class Controller:
 
         if self.should_commentate():
             if self.state.round_start_time and time.time() - self.state.round_start_time <= 15:
-                self.say(f"{victim} が開幕15秒以内にダウン")
+                self._say_commentary(f"{victim} が開幕15秒以内にダウン")
 
             if "headshot" in line.lower():
                 self.state.headshot_streaks[killer] = self.state.headshot_streaks.get(killer, 0) + 1
                 if self.state.headshot_streaks[killer] == 3:
-                    message = random.choice(HEADSHOT_STREAK_MESSAGES).format(player=killer)
-                    self.say(message)
+                    message = self._pick(HEADSHOT_STREAK_MESSAGES, "headshot_streak").format(player=killer)
+                    self._say_commentary(message)
             else:
                 self.state.headshot_streaks[killer] = 0
 
             if killer_team == victim_team and killer != victim and "BOT" not in line:
-                message = random.choice(TEAM_KILL_MESSAGES).format(player=killer)
-                self.say(message)
+                commentary, insight = self._pick_pair(TEAM_KILL_MESSAGES, TEAM_KILL_INSIGHT_MESSAGES, "team_kill")
+                self._say_duo(commentary.format(player=killer), insight.format(player=killer))
                 return
 
             if kt == TEAM_CT and not killer_is_bot:
@@ -981,33 +1179,37 @@ class Controller:
                 self._add_alive_player(TEAM_T, killer, killer_steam_id)
                 self.state.round_weapons_t.add(weapon.lower())
 
-            self._maybe_announce_elo_upset(
-                killer=killer,
-                victim=victim,
-                killer_is_bot=killer_is_bot,
-                victim_is_bot=victim_is_bot,
-                is_teamkill=is_teamkill,
-            )
-
             self.state.kill_streaks[killer] = self.state.kill_streaks.get(killer, 0) + 1
             streak = self.state.kill_streaks[killer]
 
-            if streak in KILL_STREAK_MESSAGES:
+            # The 4-kill messages all claim "1 more for the ace" — only true if the
+            # opposing team still has exactly 1 player alive. If someone else already
+            # took an earlier kill this round (teammate, suicide, etc.), the ace is
+            # no longer possible and that claim would be misleading, so skip it.
+            opposing_alive = None
+            if kt == TEAM_CT:
+                opposing_alive = len(self.state.alive_t)
+            elif kt == TEAM_T:
+                opposing_alive = len(self.state.alive_ct)
+
+            if streak == 4 and opposing_alive != 1:
+                pass
+            elif streak in KILL_STREAK_MESSAGES:
                 # At 3-kill streak, prefer a player-specific taunt by probability.
                 if streak == 3:
                     personal = self._get_personal_taunts(killer)
                     if personal:
-                        self.say(random.choice(personal))
+                        self._say_commentary(random.choice(personal))
                     else:
-                        message = random.choice(KILL_STREAK_MESSAGES[streak]).format(player=killer)
-                        self.say(message)
+                        message = self._pick(KILL_STREAK_MESSAGES[streak], "kill_streak", streak).format(player=killer)
+                        self._say_commentary(message)
                 else:
-                    message = random.choice(KILL_STREAK_MESSAGES[streak]).format(player=killer)
-                    self.say(message)
+                    message = self._pick(KILL_STREAK_MESSAGES[streak], "kill_streak", streak).format(player=killer)
+                    self._say_commentary(message)
 
             if streak >= 5:
-                ace_message = random.choice(ACE_MESSAGES).format(player=killer)
-                self.say(ace_message)
+                commentary, insight = self._pick_pair(ACE_MESSAGES, ACE_INSIGHT_MESSAGES, "ace")
+                self._say_duo(commentary.format(player=killer), insight.format(player=killer))
 
         self.state.last_kill_time = time.time()
 
@@ -1062,7 +1264,7 @@ class Controller:
         cmd = command.lower()
         arg = arg.strip() if arg else ""
 
-        if cmd == "help":
+        if cmd == "svr_help":
             for line in HELP_MESSAGES:
                 self.say(line)
             if steam_id == self.settings.admin_steamid:
@@ -1090,7 +1292,11 @@ class Controller:
 
         if cmd == "map":
             if not arg:
-                self.say("利用可能マップ: " + ", ".join(self.settings.available_maps))
+                maps_list = ", ".join(self.settings.available_maps)
+                msg = f"利用可能マップ: {maps_list}"
+                if self.settings.workshop_maps:
+                    msg += " / Workshop: " + ", ".join(self.settings.workshop_maps)
+                self.say(msg)
             else:
                 selected = arg.split()[0].lower() if arg else ""
                 if selected == "random":
@@ -1102,6 +1308,11 @@ class Controller:
                     self.state.current_map = normalize_map_name(selected)
                     self.say(f"マップ {selected} に変更します")
                     self.rcon(f"changelevel de_{selected}")
+                elif selected in self.settings.workshop_maps:
+                    workshop_id = self.settings.workshop_maps[selected]
+                    self.state.current_map = selected
+                    self.say(f"Workshopマップ {selected} を読み込みます...")
+                    self.rcon(f"host_workshop_map {workshop_id}")
                 else:
                     self.say(f"'{selected}' はサポート外のマップです")
             return
@@ -1160,16 +1371,65 @@ class Controller:
             if steam_id == self.settings.admin_steamid:
                 self.say("試合状態をリセットします")
                 self.state.reset()
+                self._reset_special_game_mode_cvars()
                 self.rcon("mp_restartgame 1")
             else:
                 self.say("このコマンドは管理者専用です")
             return
 
+        if cmd == "prac":
+            bot_count = 5
+            self.state.prac_mode_active = True
+            self.state.prac_bot_quota = bot_count
+            self.state.prac_enemy_bot_cmd = "bot_add_t" if team == "CT" else "bot_add_ct"
+            self.rcon("mp_freezetime 3")
+            self.rcon("mp_autoteambalance 0")
+            self.rcon("mp_limitteams 0")
+            self.rcon("mp_warmup_end")
+            self.rcon("bot_kick")
+            self.rcon("bot_quota_mode normal")
+            self.rcon("bot_quota 0")
+            self.rcon("bot_difficulty 5")
+            self.rcon("custom_bot_difficulty 5")
+            self.rcon("bot_allow_pistols 1")
+            self.rcon("bot_allow_rifles 1")
+            self.rcon("bot_allow_snipers 1")
+            self.rcon("bot_allow_grenades 1")
+            for _ in range(bot_count):
+                self.rcon(self.state.prac_enemy_bot_cmd)
+            # Now that our bots are placed, pin the quota to that exact count
+            # so future re-assertions (see _handle_round_start_event) hold
+            # them steady instead of kicking them back down to 0.
+            self.rcon(f"bot_quota {bot_count}")
+            self.say(f"練習モード: freezetime 3秒、反対チームにBOT{bot_count}体追加、autobalance OFF")
+            return
+
         if cmd == "lo3":
-            self.state.match_finished = False
-            self.state.live_started = True
-            self.say("試合を Live on 3 で開始します")
-            self.rcon(f"mp_maxrounds {self.settings.max_rounds}")
+            self.state.prac_mode_active = False
+            tokens = arg.split() if arg else []
+            self.state.practice_mode = False
+            for token in tokens:
+                if token.lower() == "practice":
+                    self.state.practice_mode = True
+                    continue
+                try:
+                    requested = int(token) - 1
+                except ValueError:
+                    requested = -1
+                if 0 <= requested < len(ANNOUNCER_DUOS):
+                    self.state.announcer_duo_index = requested
+                else:
+                    self.say(f"実況コンビは 1〜{len(ANNOUNCER_DUOS)} の番号で指定してください")
+
+            if self.state.practice_mode:
+                self.say("練習モードで試合を Live on 3 で開始します（戦績・ELOは記録されません）")
+            else:
+                self.say("試合を Live on 3 で開始します")
+            self.state.WIN_ROUNDS = self._effective_max_rounds() // 2 + 1
+            self.rcon(f"mp_maxrounds {self._effective_max_rounds()}")
+            # In case !prac shortened freezetime for practice, restore the
+            # normal competitive value for the real match.
+            self.rcon("mp_freezetime 15")
             self.rcon("mp_match_can_clinch 1")
             self.rcon("mp_overtime_enable 1")
             self.rcon("mp_overtime_maxrounds 6")
@@ -1339,6 +1599,11 @@ class Controller:
             if len(players) < 2:
                 self.say("接続中プレイヤー数が足りません")
                 return
+
+            if self.state.wingman_mode or self.state.dm_mode or self.state.retake_mode:
+                self._reset_special_game_mode_cvars()
+                self.state.WIN_ROUNDS = self._effective_max_rounds() // 2 + 1
+
             team_ct, team_t = kd_shuffle_balanced(players)
             self._apply_team_shuffle(team_ct, team_t, label="KD")
             return
@@ -1349,11 +1614,90 @@ class Controller:
                 self.say("接続中プレイヤー数が足りません")
                 return
 
+            if self.state.wingman_mode or self.state.dm_mode or self.state.retake_mode:
+                self._reset_special_game_mode_cvars()
+                self.state.WIN_ROUNDS = self._effective_max_rounds() // 2 + 1
+
             added = ensure_players_initialized(players, 1000)
             if added:
                 logger.info("ELO初期値を追加: %s", ", ".join(added))
             team_ct, team_t = smart_shuffle_balanced(players)
             self._apply_team_shuffle(team_ct, team_t, label="Smart")
+            return
+
+        if cmd == "wingman":
+            players = self.get_connected_players()
+            if not (1 <= len(players) <= 4):
+                self.say(f"Wingmanは人間1〜4人が必要です（現在{len(players)}人）")
+                return
+
+            wingman_maps = self.settings.wingman_maps
+            requested_map = arg.strip().lower() if arg else ""
+            if requested_map:
+                matches = [m for m in wingman_maps if requested_map in m.lower()]
+                target_map = matches[0] if matches else None
+                if not target_map:
+                    self.say(f"Wingman対応マップ: {', '.join(wingman_maps)}")
+                    return
+            else:
+                target_map = random.choice(wingman_maps)
+
+            # CS2's Wingman mode uses the same map files as normal play, but
+            # the correct (smaller) spawn/bombsite layout only kicks in on a
+            # fresh map load with the mode cvars set beforehand. So switch to
+            # a known Wingman-capable map now, and finish the bot/cvar/shuffle
+            # setup once the map change event fires (see _handle_map_change_event).
+            self._reset_special_game_mode_cvars()
+            self.state.pending_wingman_players = players
+            self.rcon("game_type 0")
+            self.rcon("game_mode 2")
+            self.say(f"Wingmanモードで {target_map} を読み込みます...")
+            self.rcon(f"changelevel {target_map}")
+            return
+
+        if cmd == "dm":
+            target_map = arg.strip().lower() if arg else ""
+            if target_map:
+                matches = [m for m in self.settings.available_maps if target_map in m.lower()]
+                if not matches:
+                    self.say(f"利用可能マップ: {', '.join(self.settings.available_maps)}")
+                    return
+                target_map = f"de_{matches[0]}"
+            else:
+                target_map = self.state.current_map
+
+            # gamemode_deathmatch.cfg (bot fill, ffa, respawns, ...) only gets
+            # applied on a fresh map load with the mode cvars set beforehand,
+            # same as Wingman.
+            self._reset_special_game_mode_cvars()
+            self.state.pending_dm = True
+            self.rcon("game_type 1")
+            self.rcon("game_mode 2")
+            self.say(f"デスマッチモードで {target_map} を読み込みます...")
+            self.rcon(f"changelevel {target_map}")
+            return
+
+        if cmd == "retake":
+            target_map = arg.strip().lower() if arg else ""
+            if target_map:
+                matches = [m for m in self.settings.available_maps if target_map in m.lower()]
+                if not matches:
+                    self.say(f"利用可能マップ: {', '.join(self.settings.available_maps)}")
+                    return
+                target_map = f"de_{matches[0]}"
+            else:
+                target_map = self.state.current_map
+
+            # Official Retakes (added 2025-10-23): game_type 0 / game_mode 0
+            # with sv_skirmish_id 12 selects the Retakes "war game", which
+            # execs gamemode_retakecasual.cfg on the next fresh map load.
+            self._reset_special_game_mode_cvars()
+            self.state.pending_retake = True
+            self.rcon("game_type 0")
+            self.rcon("game_mode 0")
+            self.rcon("sv_skirmish_id 12")
+            self.say(f"Retakesモードで {target_map} を読み込みます...")
+            self.rcon(f"changelevel {target_map}")
             return
 
         if cmd == "balancecheck":
@@ -1454,6 +1798,14 @@ class Controller:
         return ""
 
     def _handle_round_start_event(self, _match: re.Match[str], line: str) -> None:
+        if self.state.prac_mode_active:
+            # gamemode_competitive.cfg's bot_quota_mode "competitive" keeps
+            # re-applying itself around each round, quietly resetting our
+            # bot_quota override and auto-filling/rebalancing both teams.
+            # Re-assert it every round -- pinned to our actual bot count, not
+            # 0, or this would kick our own practice bots back down to zero.
+            self.rcon("bot_quota_mode normal")
+            self.rcon(f"bot_quota {self.state.prac_bot_quota}")
         self.handle_round_start(line)
 
     def _handle_kill_event(self, match: re.Match[str], line: str) -> None:
@@ -1492,6 +1844,15 @@ class Controller:
         self.state.rounds_played = int(match.group(1))
         self.debug_print(f"ラウンド数(MatchStatus): {self.state.rounds_played}")
 
+    def _handle_warmup_start_event(self, _match: re.Match[str], _line: str) -> None:
+        """Force live_started off whenever real warmup begins, in case a prior
+        match never reached Game Over to reset it naturally (e.g. cut short
+        for testing)."""
+        if self.state.live_started:
+            logger.info("Warmup_Start検知: live_started が立ったままだったためリセットします")
+        self.state.live_started = False
+        self.state.match_finished = True
+
     def _handle_game_over_event(self, match: re.Match[str], _line: str) -> None:
         if self.state.match_finished:
             return
@@ -1521,14 +1882,17 @@ class Controller:
             for player in self.state.alive_t:
                 self.state.player_teams[player] = TEAM_T
 
-        self.say("試合終了！おつかれさまでした")
-        self.say(f"全{self.state.rounds_played}ラウンドのハイライトです")
+        self._say_commentary("試合終了！おつかれさまでした")
+        self._say_commentary(f"全{self.state.rounds_played}ラウンドのハイライトです")
         for accolade_type, player, value in self.state.accolades:
             message = get_accolade_message(accolade_type, player, value)
             if message:
-                self.say(message)
+                self._say_commentary(message)
 
-        self.say(f"{winner} の勝利！GG WP!")
+        self._say_commentary(f"{winner} の勝利！GG WP!")
+        duo = self._current_duo()
+        if duo:
+            self._say_duo(*duo["sign_off"])
 
         ct_players = self._collect_team_players(TEAM_CT)
         t_players = self._collect_team_players(TEAM_T)
@@ -1545,24 +1909,29 @@ class Controller:
             )
 
         logger.debug("[DEBUG] CT: %s, T: %s", ct_players, t_players)
-        tracked_ct = [p for p in ct_players if self._resolve_player_steam_id(p)]
-        tracked_t = [p for p in t_players if self._resolve_player_steam_id(p)]
-        skipped = [p for p in (ct_players + t_players) if not self._resolve_player_steam_id(p)]
-        if skipped:
-            logger.info("SteamID未登録のため結果集計をスキップ: %s", skipped)
 
-        self.record_match_result(winner, tracked_ct, tracked_t)
-        all_tracked = tracked_ct + tracked_t
-        elo_before = {p: get_elo(p) for p in all_tracked}
-        update_elo(winner, tracked_ct, tracked_t)
-        save_elo()
-        for p in all_tracked:
-            before = elo_before[p]
-            after = get_elo(p)
-            sign = "+" if after >= before else ""
-            self.say(f"ELO {p}: {sign}{after - before} ({before}→{after})")
+        if self.state.practice_mode:
+            self.say("練習モードのため、戦績・ELOは記録されません")
+            logger.info("MATCH END (practice): %s の結果は記録をスキップしました", winner)
+        else:
+            tracked_ct = [p for p in ct_players if self._resolve_player_steam_id(p)]
+            tracked_t = [p for p in t_players if self._resolve_player_steam_id(p)]
+            skipped = [p for p in (ct_players + t_players) if not self._resolve_player_steam_id(p)]
+            if skipped:
+                logger.info("SteamID未登録のため結果集計をスキップ: %s", skipped)
 
-        logger.info("MATCH END: %s の結果を保存しました", winner)
+            self.record_match_result(winner, tracked_ct, tracked_t)
+            all_tracked = tracked_ct + tracked_t
+            elo_before = {p: get_elo(p) for p in all_tracked}
+            update_elo(winner, tracked_ct, tracked_t)
+            save_elo()
+            for p in all_tracked:
+                before = elo_before[p]
+                after = get_elo(p)
+                sign = "+" if after >= before else ""
+                self.say(f"ELO {p}: {sign}{after - before} ({before}→{after})")
+
+            logger.info("MATCH END: %s の結果を保存しました", winner)
         if not self.state.accolades:
             self.say("アコレード情報はありませんでした")
         self.state.accolades.clear()
@@ -1589,12 +1958,39 @@ class Controller:
     def _handle_map_change_event(self, match: re.Match[str], _line: str) -> None:
         new_map = match.group(1)
         logger.info("マップ変更検知: %s -> 状態をリセット", new_map)
+        was_wingman = self.state.wingman_mode
+        was_dm = self.state.dm_mode
+        was_retake = self.state.retake_mode
+        pending_wingman_players = self.state.pending_wingman_players
+        pending_dm = self.state.pending_dm
+        pending_retake = self.state.pending_retake
         self.state.reset()
         self.state.current_map = normalize_map_name(new_map)
+        self.state.pending_wingman_players = None
+        self.state.pending_dm = False
+        self.state.pending_retake = False
         self.setup_event_listeners()
         self.ensure_rcon_alive()
         self.apply_server_password()
         self.reset_command_flags()
+        if pending_dm:
+            # This reload was triggered by !dm; gamemode_deathmatch.cfg
+            # (bot fill, ffa, respawns, ...) applies itself automatically
+            # now that the map has (re)loaded with the mode cvars set.
+            self.state.dm_mode = True
+        elif pending_retake:
+            # This reload was triggered by !retake; gamemode_retakecasual.cfg
+            # applies itself automatically now that the map has (re)loaded
+            # with sv_skirmish_id set.
+            self.state.retake_mode = True
+        elif pending_wingman_players:
+            # This reload was triggered by !wingman itself; finish setup now
+            # that the map has (re)loaded with the mode cvars applied.
+            self._start_wingman_match(pending_wingman_players)
+        elif was_wingman or was_dm or was_retake:
+            # Leaving a special mode via a plain !map: clean up any leftover
+            # cvars (sv_skirmish_id, weapon restrictions, bots, ...).
+            self._reset_special_game_mode_cvars()
 
     def _handle_chat_command_event(self, match: re.Match[str], _line: str) -> None:
         player_name, steam_id, team, command, arg = match.groups()
@@ -1766,6 +2162,7 @@ class Controller:
 
         self.current_log_path = None
         self.log_fp = None
+        is_first_log_file = True
 
         wait_time = 0
         while True:
@@ -1785,7 +2182,15 @@ class Controller:
                     self.log_fp.close()
                 self.current_log_path = latest
                 self.log_fp = open(latest, "r", encoding="utf-8", errors="ignore")
-                self.log_fp.seek(0, os.SEEK_END)
+                if is_first_log_file:
+                    # Only skip history for the very first file we attach to
+                    # (e.g. on process start/restart) so we don't replay a
+                    # long-running server's entire past log. Any later file
+                    # (created by a map change during this session) is brand
+                    # new, and we need to read it from the start or we miss
+                    # the "Loading map" line the map-change handler needs.
+                    self.log_fp.seek(0, os.SEEK_END)
+                is_first_log_file = False
                 logger.info("ログ監視切り替え: %s", latest)
 
             line = self.log_fp.readline()

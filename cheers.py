@@ -1,75 +1,109 @@
-﻿CHEER_MESSAGES = [
-    "{player}、ここで1本取り切りたい。",
-    "{player}、落ち着いていこう。",
-    "{player}、ここが勝負どころ。",
-    "{player}、次の判断が大事。",
-    "{player}、人数有利を作りたい。",
-    "{player}、このラウンドを掴めるか。",
-    "{player}、集中していこう。",
-    "{player}、流れを変えるキルが欲しい。",
+﻿REACTION_MESSAGES = [
+    "いや、その通りだと思いますね！",
+    "うんうん、まさにそれです！",
+    "なるほど、確かに！",
+    "だよなーっ！",
+]
+
+CHEER_MESSAGES = [
+    "{player}、ここで1本取り切れーー！",
+    "{player}、いけるぞ、思い切っていこう！",
+    "{player}、まさに勝負どころだ！",
+    "{player}、次の判断が全てを決める！",
+    "{player}、ここで人数有利を作りたい！",
+    "{player}、このラウンド掴めるか！？",
+    "{player}、集中力を切らすな！",
+    "{player}、流れを変える一撃を頼む！",
 ]
 
 ONE_VS_ONE_MESSAGES = [
-    "1v1、最後の読み合い。",
-    "1対1の最終局面、勝つのはどっちだ。",
-    "1v1クラッチタイム、緊張感MAX。",
-    "{player1} vs {player2}、ファイナルデュエル。",
+    "1v1だーー！最後の読み合い、震えるぞ！",
+    "1対1の最終局面！勝つのはどっちだーー！？",
+    "1v1クラッチタイム！緊張感MAXだ！",
+    "{player1} vs {player2}、ファイナルデュエル開幕！",
+]
+
+ONE_VS_ONE_INSIGHT_MESSAGES = [
+    "ここは撃ち合いよりポジション取りが勝負を分けますね。",
+    "音を聞いてるはずなので、無駄撃ちは禁物です。",
+    "どちらも焦って前に出過ぎないことがポイントですね。",
+    "有利ポジションを取れた方がまず一歩リードです。",
 ]
 
 CLUTCH_MESSAGES = [
-    "{player} が 1v{count} のクラッチに挑戦。",
-    "{player}、厳しい 1v{count} を背負った。",
-    "{player} vs {count}、ここから逆転なるか。",
-    "{player} の 1v{count}、見せ場の時間だ。",
-    "注目は {player} のクラッチ判断。",
+    "{player} が 1v{count} のクラッチに挑戦だ！！",
+    "{player}、厳しい 1v{count} を背負った！ここが見せ場！",
+    "{player} vs {count}、ここから逆転なるかーー！？",
+    "{player} の 1v{count}、まさに見せ場の時間だ！",
+    "注目は {player} のクラッチ判断！信じろ！",
+]
+
+CLUTCH_INSIGHT_MESSAGES = [
+    "数的不利なので、各個撃破に持ち込めるかがカギですね。",
+    "無理に複数を相手にせず、1人ずつ処理したいところです。",
+    "時間を味方につける戦い方も選択肢に入りますね。",
+    "{player} なら冷静に立ち回れるはずです、期待しましょう。",
 ]
 
 KILL_STREAK_MESSAGES = {
     2: [
-        "{player} の2キル、勢いが出てきた。",
-        "{player} 連続キルで主導権。",
-        "{player}、2連取でラウンド優勢。",
+        "{player} の2キル！勢いが出てきたぞ！",
+        "{player} 連続キルで主導権を握った！",
+        "{player}、2連取でラウンド優勢！",
     ],
     3: [
-        "{player} の3キル、止まらない。",
-        "{player}、キルマシーン状態。",
-        "{player} の3連キルで流れを作る。",
+        "{player} の3キル！止まらないーー！",
+        "{player}、完全にキルマシーン状態だ！",
+        "{player} の3連キルで流れを完全に掴んだ！",
     ],
     4: [
-        "{player} の4キル、あと1人。",
-        "{player} がラウンドを支配している。",
-        "{player}、4人抜き。ACEなるか。",
+        "{player} の4キル！あと1人でACEだ！",
+        "{player} がこのラウンドを完全に支配している！",
+        "{player}、4人抜き！ACEなるかーー！？",
     ],
 }
 
 ACE_MESSAGES = [
-    "{player} がACE達成！",
-    "{player} の5キル、完璧なラウンド！",
-    "{player} が全員をなぎ倒した！",
-    "{player}、圧巻のACE！",
+    "{player} がACE達成ーーー！！",
+    "{player} の5キル、完璧すぎるラウンド！！",
+    "{player} が敵を全員なぎ倒したーー！",
+    "{player}、圧巻のACE！これは伝説だ！",
+]
+
+ACE_INSIGHT_MESSAGES = [
+    "5人全員のポジションを把握してないとできない動きですね。",
+    "エイムだけでなく、状況判断が完璧だったと思います。",
+    "これは今日のハイライト間違いなしですね。",
+    "{player} の勢い、次のラウンドにも注目です。",
 ]
 
 HEADSHOT_STREAK_MESSAGES = [
-    "{player}、ヘッドショットが止まらない。",
-    "{player} のHS連発、精度が高い。",
-    "{player}、連続ヘッドショット！",
+    "{player}、ヘッドショットが止まらないーー！",
+    "{player} のHS連発、精度がえげつない！",
+    "{player}、連続ヘッドショット！化け物か！？",
 ]
 
 TEAM_KILL_MESSAGES = [
-    "[TK] {player}、味方キルに注意。",
-    "[TK] {player}、落ち着いていこう。",
-    "[TK] {player}、フレンドリーファイア発生。",
+    "[TK] {player}、味方キルは落ち着いていこう！",
+    "[TK] {player}、気持ちはわかるが冷静に！",
+    "[TK] {player}、フレンドリーファイア発生！気をつけろ！",
+]
+
+TEAM_KILL_INSIGHT_MESSAGES = [
+    "{player}、それはさすがにダメですね。武器の切り替え、ちゃんと確認しましょう。",
+    "これは完全に不注意です。{player}、次は絶対に気をつけてください。",
+    "{player}、フラッシュもそうですが、味方の位置は常に頭に入れておくべきですね。",
 ]
 
 ELO_UPSET_MESSAGES = [
-    "{killer} が格上の {victim} を撃破。これは大金星。",
-    "ELO差をひっくり返した。{killer}、ナイスピック。",
-    "{killer} が {victim} を落とした。番狂わせの一発。",
+    "{killer} が格上の {victim} を撃破！これは大金星だーー！",
+    "ELO差をひっくり返したーー！{killer}、ナイスピック！",
+    "{killer} が {victim} を落とした！番狂わせの一発だ！",
 ]
 
 HELP_MESSAGES = [
     "使えるコマンド:",
-    "!help - ヘルプを表示",
+    "!svr_help - ヘルプを表示",
     "!coin - コイントス",
     "!shuffle - チームをランダムシャッフル",
     "!pause - 次のラウンド開始時にポーズ",
@@ -77,7 +111,8 @@ HELP_MESSAGES = [
     "!omikuji - 今日の運勢とラッキー武器",
     "!tactics - 現在マップの戦術ヒント",
     "!rdy - チームの準備完了を宣言",
-    "!lo3 - Live on 3 で試合開始",
+    "!lo3 [番号] [practice] - Live on 3 で試合開始（番号で実況コンビ指定、practiceで戦績・ELO記録なしの練習モード）",
+    "!prac - warmup終了＆freezetime3秒（撃ち合い練習用）",
 ]
 
 HELP_MESSAGES_ADMIN = [
@@ -85,6 +120,9 @@ HELP_MESSAGES_ADMIN = [
     "!rcon <command> - RCONコマンド実行（管理者）",
     "!smartshuffle - ELO差最小でチーム分け",
     "!kdshuffle - K/D差最小でチーム分け",
+    "!wingman - 接続中4人でWingman(2v2)モードに切替＆チーム分け",
+    "!dm [マップ名] - デスマッチモードに切替",
+    "!retake [マップ名] - Retakesモードに切替",
     "!kd [name] - K/D確認",
     "!top kd - K/Dランキング",
     "!balancecheck - 現在チームのELO差を確認",

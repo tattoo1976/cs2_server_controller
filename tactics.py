@@ -74,6 +74,28 @@ TACTICS = {
 }
 
 
+MAP_DISPLAY_NAMES = {
+    "de_dust2": "ダスト2",
+    "de_inferno": "インフェルノ",
+    "de_ancient": "エインシェント",
+    "de_mirage": "ミラージュ",
+    "de_cache": "キャッシュ",
+    "de_nuke": "ニューク",
+    "de_overpass": "オーバーパス",
+    "de_vertigo": "ヴァーティゴ",
+    "de_train": "トレイン",
+    "de_anubis": "アヌビス",
+}
+
+
+def get_map_display_name(map_name: str) -> str:
+    """Human-friendly map name for commentary (falls back to a cleaned-up key)."""
+    key = normalize_map_name(map_name)
+    if key in MAP_DISPLAY_NAMES:
+        return MAP_DISPLAY_NAMES[key]
+    return key.removeprefix("de_").replace("_", " ").title()
+
+
 def normalize_map_name(map_name: str) -> str:
     """Normalize map name to de_* form used by TACTICS keys."""
     if not map_name:

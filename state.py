@@ -109,6 +109,45 @@ class MatchState:
     last_comment_at: Dict[str, float] = field(default_factory=dict)
     round_comment_keys: Set[str] = field(default_factory=set)
 
+    # Announcer persona picked for the current match (index into ANNOUNCER_DUOS)
+    announcer_duo_index: Optional[int] = None
+
+    # Practice mode: commentary stays on, but kill/death, ELO, and match-result
+    # recording are skipped so practice matches don't pollute stats.
+    practice_mode: bool = False
+
+    # Wingman (2v2) mode: uses wingman_max_rounds instead of max_rounds for
+    # WIN_ROUNDS/side-switch/overtime timing.
+    wingman_mode: bool = False
+
+    # Players to set up as a Wingman match once the map (re)load triggered by
+    # !wingman finishes. Deliberately NOT cleared by reset() -- it needs to
+    # survive the state.reset() that the map-change handler itself performs.
+    pending_wingman_players: Optional[List[str]] = None
+
+    # Deathmatch mode (game_type 1 / game_mode 2). Like wingman_mode, used to
+    # know whether to restore game_mode when leaving it.
+    dm_mode: bool = False
+
+    # Set by !dm right before its map (re)load; deliberately NOT cleared by
+    # reset() so it survives the map-change handler's own reset() call.
+    pending_dm: bool = False
+
+    # Retakes mode (game_type 0 / game_mode 0 / sv_skirmish_id 12).
+    retake_mode: bool = False
+
+    # Set by !retake right before its map (re)load; deliberately NOT cleared
+    # by reset() so it survives the map-change handler's own reset() call.
+    pending_retake: bool = False
+
+    # !prac (aim practice) mode: gamemode_competitive.cfg's bot_quota_mode
+    # "competitive" re-applies itself around every round, undoing our
+    # bot_quota override -- so while this is active we re-assert it each
+    # round start (see handle_round_start).
+    prac_mode_active: bool = False
+    prac_enemy_bot_cmd: Optional[str] = None
+    prac_bot_quota: int = 0
+
     def __post_init__(self):
         # Compute derived values
         """
@@ -174,8 +213,6 @@ class MatchState:
         self.player_teams.clear()
 
         self.commentary_enabled = True
-
-        self.current_map = "de_dust2"
         self.debug_enabled = False
         self.accolades.clear()
 
@@ -198,5 +235,13 @@ class MatchState:
         self.json_recovery_count = 0
         self.last_comment_at.clear()
         self.round_comment_keys.clear()
+        self.announcer_duo_index = None
+        self.practice_mode = False
+        self.wingman_mode = False
+        self.dm_mode = False
+        self.retake_mode = False
+        self.prac_mode_active = False
+        self.prac_enemy_bot_cmd = None
+        self.prac_bot_quota = 0
 
 

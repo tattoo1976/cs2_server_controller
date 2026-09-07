@@ -32,13 +32,85 @@ def balanced_shuffle(players, rating_fn):
 
 
 def smart_shuffle_balanced(players):
-    """ELO差が最小になる2チーム分割を返す。"""
-    return balanced_shuffle(players, get_elo)
+    """ELO差が最小になる2チーム分割を返す。
+
+    最高ELOと最低ELOのプレイヤーは同じチームに固定し（強い人が弱い人を
+    引っ張る形にする）、残りのメンバーでチーム間のELO合計差が最小になる
+    ように振り分ける。
+    """
+    players = list(players)
+    if len(players) < 2:
+        return [], []
+    if len(players) < 4:
+        # Not enough players to meaningfully pair a carry with the weakest
+        # without distorting team sizes too much; fall back to plain balance.
+        return balanced_shuffle(players, get_elo)
+
+    ranked = sorted(players, key=get_elo)
+    weakest = ranked[0]
+    strongest = ranked[-1]
+
+    remaining = [p for p in players if p not in (weakest, strongest)]
+    n = len(players)
+    # Team sizes including the fixed pair; the rest fills out team1.
+    team_sizes = [n // 2] if n % 2 == 0 else [n // 2, n // 2 + 1]
+
+    best_diff = float("inf")
+    best_split: tuple = ([weakest, strongest], remaining)
+    fixed_elo = get_elo(weakest) + get_elo(strongest)
+
+    for size in team_sizes:
+        rest_size = size - 2
+        if rest_size < 0 or rest_size > len(remaining):
+            continue
+        for combo in itertools.combinations(remaining, rest_size):
+            team1 = [weakest, strongest] + list(combo)
+            team2 = [p for p in remaining if p not in combo]
+            diff = abs((fixed_elo + sum(get_elo(p) for p in combo)) - sum(get_elo(p) for p in team2))
+            if diff < best_diff:
+                best_diff = diff
+                best_split = (team1, team2)
+
+    return best_split
 
 
 def kd_shuffle_balanced(players):
     """K/D比の合計差が最小になる2チーム分割を返す。"""
     return balanced_shuffle(players, get_kd_ratio)
+
+
+def wingman_shuffle_balanced(players):
+    """Wingman(2v2)用: 1〜4人をELO差最小の2v2に分割する。
+
+    人間が4人未満の場合は "BOT" というプレースホルダーで埋めて2v2にする
+    （呼び出し側で "BOT" の数だけ bot_add_ct / bot_add_t を発行する想定）。
+    """
+    players = list(players)
+    n = len(players)
+    if n < 1 or n > 4:
+        return [], []
+    if n == 4:
+        return balanced_shuffle(players, get_elo)
+
+    bot_elo = 1000
+    if n == 1:
+        return [players[0], "BOT"], ["BOT", "BOT"]
+    if n == 2:
+        pair = list(players)
+        random.shuffle(pair)
+        return [pair[0], "BOT"], [pair[1], "BOT"]
+
+    # n == 3: one team keeps both remaining humans, the other pairs the
+    # "solo" human with a bot. Pick whichever solo choice balances best.
+    best_diff = float("inf")
+    best_split: tuple = ([], [])
+    for solo in players:
+        duo = [p for p in players if p != solo]
+        diff = abs(sum(get_elo(p) for p in duo) - (get_elo(solo) + bot_elo))
+        if diff < best_diff:
+            best_diff = diff
+            best_split = (duo, [solo, "BOT"])
+    return best_split
 
 def assign_teams(team_ct, team_t, rcon_func=None, steam_id_resolver=None):
     """

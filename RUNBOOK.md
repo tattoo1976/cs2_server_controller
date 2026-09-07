@@ -53,7 +53,7 @@ At startup, logs include `config source: ...`.
 
 Common:
 
-- `!help`
+- `!svr_help`
 - `!commentary on|off`
 - `!debug`
 - `!map <name|random>`

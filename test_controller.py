@@ -66,14 +66,14 @@ class ControllerTests(unittest.TestCase):
 
         with mock.patch.object(controller, "handle_chat_command") as handler:
             controller.handle_line(
-                'L 01/03/2026 - 18:18:05: "tattoo<2><[U:1:6111605]><CT>" say "!help hello world"'
+                'L 01/03/2026 - 18:18:05: "tattoo<2><[U:1:6111605]><CT>" say "!svr_help hello world"'
             )
 
         handler.assert_called_once_with(
             "tattoo",
             "[U:1:6111605]",
             "CT",
-            "help",
+            "svr_help",
             "hello world",
         )
 

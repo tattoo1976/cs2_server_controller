@@ -2,7 +2,7 @@
 
 admin_steamid: "[U:1:YOUR_STEAM_ACCOUNT_ID]"
 server_password: ""
-log_dir: "D:\\cs2-ds\\game\\csgo\\logs"
+log_dir: "E:\\cs2-ds\\game\\csgo\\logs"
 max_rounds: 24
 taunt_chance: 0.25
 
@@ -12,6 +12,10 @@ available_maps:
   - ancient
   - mirage
   - cache
+
+# Steam Workshop maps: "<name for !map>=<workshop file id>"
+workshop_maps:
+  - "aim_map=123456789"
 
 silence_seconds: 30
 idle_comment_seconds: 30
