@@ -44,6 +44,7 @@ from messages import (
     OPENING_PLAYER_DUEL_MESSAGES,
 )
 from player_elo import get_all_elo, get_elo, load_elo, save_elo, update_elo, ensure_players_initialized
+from match_history import append_match
 from player_stats import (
     PLAYER_STATS,
     TARGETS,
@@ -292,6 +293,15 @@ class Controller:
         self.rcon(f'sv_password "{safe}"')
         logger.info("server password has been applied")
 
+    def apply_server_defaults(self) -> None:
+        """Re-assert baseline server cvars that some gamemode cfgs quietly override.
+
+        mp_autokick defaults to on and disconnects idle spectators after a
+        while, and server.cfg's own setting doesn't survive a mode switch's
+        cvar reset -- so send it again on every startup/map change too.
+        """
+        self.rcon("mp_autokick 0")
+
     def reset_command_flags(self) -> None:
         """Reset transient command flags after a map change."""
         self.state.coin_used = False
@@ -447,6 +457,24 @@ class Controller:
             f"Wingmanモード（MR{self.settings.wingman_max_rounds // 2}）に切り替えました{bot_note}。"
             "準備ができたら !rdy → !lo3 で開始してください"
         )
+
+    def _record_match_kill(self, killer: str, killer_team: str, victim: str, victim_team: str,
+                           weapon: str, is_teamkill: bool, killer_is_bot: bool, victim_is_bot: bool) -> None:
+        records = self.state.match_records
+
+        def entry(name: str) -> dict:
+            return records.setdefault(name.upper(), {"kills": 0, "deaths": 0, "weapons": {}, "team": None})
+
+        if not victim_is_bot:
+            ventry = entry(victim)
+            ventry["deaths"] += 1
+            ventry["team"] = victim_team
+        if not killer_is_bot and not is_teamkill:
+            kentry = entry(killer)
+            kentry["kills"] += 1
+            kentry["team"] = killer_team
+            w = weapon.lower()
+            kentry["weapons"][w] = kentry["weapons"].get(w, 0) + 1
 
     def _recently_connected_names(self) -> set[str]:
         """Return non-bot names seen via connect/disconnect log events (real-time, may lead `status` by a beat)."""
@@ -886,8 +914,9 @@ class Controller:
 
         if self.state.pause_requested:
             self.state.pause_requested = False
+            self.state.match_paused = True
             self.rcon("mp_pause_match")
-            self.say("試合をポーズしました。再開は !unpause で")
+            self.say("試合をポーズしました。再開は !pause で")
 
         # Rebuild alive players from current team assignments at each round start.
         # This prevents stale/incomplete alive sets from causing false clutch/1v1 calls.
@@ -1143,6 +1172,8 @@ class Controller:
                 increment_deaths(victim)
             if not killer_is_bot and not is_teamkill:
                 increment_kills(killer)
+            self._record_match_kill(killer, killer_team, victim, victim_team, weapon,
+                                    is_teamkill, killer_is_bot, victim_is_bot)
 
         if killer_is_bot:
             kt = "UNKNOWN"
@@ -1330,12 +1361,22 @@ class Controller:
 
         if cmd in ("ct", "t"):
             if self.state.side_select_active and team == self.state.coin_winner:
+                desired_team = "CT" if cmd == "ct" else "TERRORIST"
                 self.say(f"{player} が {cmd.upper()} を選択")
                 self.state.side_select_active = False
+                if team != desired_team:
+                    self.rcon("mp_swapteams")
             elif not self.state.side_select_active:
                 self.say("現在はサイド選択タイミングではありません")
             else:
                 self.say("サイド選択権がありません")
+            return
+
+        if cmd == "1on1":
+            if steam_id == self.settings.admin_steamid:
+                self.rcon("mp_warmup_end")
+                self.rcon("mp_freezetime 1")
+                self.say("1on1 開始")
             return
 
         if cmd == "rdy":
@@ -1421,6 +1462,8 @@ class Controller:
                 else:
                     self.say(f"実況コンビは 1〜{len(ANNOUNCER_DUOS)} の番号で指定してください")
 
+            self.state.match_map = self.state.current_map
+            self.state.match_records.clear()
             if self.state.practice_mode:
                 self.say("練習モードで試合を Live on 3 で開始します（戦績・ELOは記録されません）")
             else:
@@ -1483,21 +1526,20 @@ class Controller:
                 self.say("このコマンドは管理者専用です")
             return
 
-        if cmd == "pause":
+        if cmd in ("pause", "unpause"):
             if not self.state.live_started:
                 self.say("試合中のみ使用できます")
                 return
             if self.state.pause_requested:
-                self.say("すでにポーズ予約済みです")
-                return
-            self.state.pause_requested = True
-            self.say("次のラウンド開始時にポーズします")
-            return
-
-        if cmd == "unpause":
-            self.state.pause_requested = False
-            self.rcon("mp_unpause_match")
-            self.say("試合を再開します")
+                self.state.pause_requested = False
+                self.say("ポーズ予約を取り消しました")
+            elif self.state.match_paused:
+                self.state.match_paused = False
+                self.rcon("mp_unpause_match")
+                self.say("試合を再開します")
+            else:
+                self.state.pause_requested = True
+                self.say("次のラウンド開始時にポーズします(もう一度 !pause で取り消し)")
             return
 
         if cmd == "shuffle":
@@ -1910,6 +1952,15 @@ class Controller:
 
         logger.debug("[DEBUG] CT: %s, T: %s", ct_players, t_players)
 
+        if not self.state.practice_mode and self.state.match_records:
+            append_match({
+                "date": datetime.now().isoformat(timespec="minutes"),
+                "map": self.state.match_map,
+                "winner": winner,
+                "score": {"CT": ct_score, "T": t_score},
+                "players": {name: dict(rec) for name, rec in self.state.match_records.items()},
+            })
+
         if self.state.practice_mode:
             self.say("練習モードのため、戦績・ELOは記録されません")
             logger.info("MATCH END (practice): %s の結果は記録をスキップしました", winner)
@@ -1972,6 +2023,7 @@ class Controller:
         self.setup_event_listeners()
         self.ensure_rcon_alive()
         self.apply_server_password()
+        self.apply_server_defaults()
         self.reset_command_flags()
         if pending_dm:
             # This reload was triggered by !dm; gamemode_deathmatch.cfg
@@ -2159,6 +2211,7 @@ class Controller:
         load_elo()
         load_targets()
         self.apply_server_password()
+        self.apply_server_defaults()
 
         self.current_log_path = None
         self.log_fp = None

@@ -148,6 +148,14 @@ class MatchState:
     prac_enemy_bot_cmd: Optional[str] = None
     prac_bot_quota: int = 0
 
+    # !pause toggles: pause_requested = armed for next round start,
+    # match_paused = currently paused via mp_pause_match.
+    match_paused: bool = False
+
+    # Per-match history, written out at game over (skipped in practice mode).
+    match_map: Optional[str] = None
+    match_records: Dict[str, dict] = field(default_factory=dict)
+
     def __post_init__(self):
         # Compute derived values
         """
@@ -243,5 +251,8 @@ class MatchState:
         self.prac_mode_active = False
         self.prac_enemy_bot_cmd = None
         self.prac_bot_quota = 0
+        self.match_paused = False
+        self.match_map = None
+        self.match_records.clear()
 
 
