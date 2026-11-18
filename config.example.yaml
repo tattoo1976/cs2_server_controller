@@ -12,6 +12,7 @@ available_maps:
   - ancient
   - mirage
   - cache
+  - cbble
 
 # Steam Workshop maps: "<name for !map>=<workshop file id>"
 workshop_maps:

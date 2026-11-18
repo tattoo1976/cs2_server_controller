@@ -346,6 +346,13 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(controller.state.current_map, "de_cache")
         self.assertIn("changelevel de_cache", rcon_calls)
 
+    def test_map_command_supports_cbble(self) -> None:
+        controller, rcon_calls, _ = self.make_controller()
+        controller.handle_chat_command("tattoo", "[U:1:6111605]", "CT", "map", "cbble")
+
+        self.assertEqual(controller.state.current_map, "de_cbble")
+        self.assertIn("changelevel de_cbble", rcon_calls)
+
     def test_tactics_uses_normalized_current_map(self) -> None:
         controller, _, _ = self.make_controller()
         controller.state.current_map = "mirage"
